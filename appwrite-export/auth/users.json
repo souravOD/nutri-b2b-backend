@@ -1,0 +1,156 @@
+[
+  {
+    "$id": "d7c135df-e9cd-4161-91f8-0ae18c803929",
+    "$createdAt": "2025-08-08T21:12:31.020+00:00",
+    "$updatedAt": "2025-10-01T13:30:59.653+00:00",
+    "name": "Sourav",
+    "password": "$argon2id$v=19$m=65536,t=4,p=3$V1pBdUpQRElSQzVhWW03Tw$O017/c6NdwE7qr5ghxM6YZeRJZgoKVpoUeuZRGxF/cI",
+    "hash": "argon2",
+    "hashOptions": {
+      "type": "argon2",
+      "memoryCost": 2048,
+      "timeCost": 4,
+      "threads": 3
+    },
+    "registration": "2025-08-08T21:12:31.018+00:00",
+    "status": true,
+    "labels": [
+      "admin"
+    ],
+    "passwordUpdate": "2025-08-25T17:08:52.021+00:00",
+    "email": "souravpatil1859@gmail.com",
+    "phone": "",
+    "emailVerification": true,
+    "phoneVerification": false,
+    "mfa": false,
+    "prefs": {},
+    "targets": [
+      {
+        "$id": "6896683f159c64fbc81d",
+        "$createdAt": "2025-08-08T21:12:31.088+00:00",
+        "$updatedAt": "2025-08-08T21:12:31.088+00:00",
+        "name": "",
+        "userId": "d7c135df-e9cd-4161-91f8-0ae18c803929",
+        "providerId": null,
+        "providerType": "email",
+        "identifier": "souravpatil1859@gmail.com",
+        "expired": false
+      }
+    ],
+    "accessedAt": "2025-10-01T13:30:59.650+00:00"
+  },
+  {
+    "$id": "68a655760027dc0d8fa7",
+    "$createdAt": "2025-08-20T23:08:38.173+00:00",
+    "$updatedAt": "2025-10-06T20:11:32.445+00:00",
+    "name": "alex wilson",
+    "password": "$argon2id$v=19$m=65536,t=4,p=3$RzFuQmVlQnRka3FxNTNNVg$kmGxTjnFstad8p6aglx0thT7XMHdoePOiO25WrGNKtw",
+    "hash": "argon2",
+    "hashOptions": {
+      "type": "argon2",
+      "memoryCost": 2048,
+      "timeCost": 4,
+      "threads": 3
+    },
+    "registration": "2025-08-20T23:08:38.172+00:00",
+    "status": true,
+    "labels": [],
+    "passwordUpdate": "2025-08-20T23:08:38.172+00:00",
+    "email": "sourav.patil@odysseyts.com",
+    "phone": "",
+    "emailVerification": true,
+    "phoneVerification": false,
+    "mfa": false,
+    "prefs": {},
+    "targets": [
+      {
+        "$id": "68a6557635e9a69b4816",
+        "$createdAt": "2025-08-20T23:08:38.220+00:00",
+        "$updatedAt": "2025-08-20T23:08:38.220+00:00",
+        "name": "",
+        "userId": "68a655760027dc0d8fa7",
+        "providerId": null,
+        "providerType": "email",
+        "identifier": "sourav.patil@odysseyts.com",
+        "expired": false
+      }
+    ],
+    "accessedAt": "2025-10-06T20:11:32.441+00:00"
+  },
+  {
+    "$id": "68deb0d1002534e717c4",
+    "$createdAt": "2025-10-02T17:05:21.199+00:00",
+    "$updatedAt": "2025-10-02T17:05:37.806+00:00",
+    "name": "Santosh Patil",
+    "password": "$argon2id$v=19$m=65536,t=4,p=3$V1VGclZtY2R5cUhCLkdzbQ$OBp2gSeVGiPDffi7Zo2ObSVh08yhTT3nDs3eC5IumKQ",
+    "hash": "argon2",
+    "hashOptions": {
+      "type": "argon2",
+      "memoryCost": 2048,
+      "timeCost": 4,
+      "threads": 3
+    },
+    "registration": "2025-10-02T17:05:21.198+00:00",
+    "status": true,
+    "labels": [],
+    "passwordUpdate": "2025-10-02T17:05:21.198+00:00",
+    "email": "sourru1999@gmail.com",
+    "phone": "",
+    "emailVerification": true,
+    "phoneVerification": false,
+    "mfa": false,
+    "prefs": {},
+    "targets": [
+      {
+        "$id": "68deb0d13a2fd75c70b4",
+        "$createdAt": "2025-10-02T17:05:21.238+00:00",
+        "$updatedAt": "2025-10-02T17:05:21.238+00:00",
+        "name": "",
+        "userId": "68deb0d1002534e717c4",
+        "providerId": null,
+        "providerType": "email",
+        "identifier": "sourru1999@gmail.com",
+        "expired": false
+      }
+    ],
+    "accessedAt": "2025-10-02T17:05:21.198+00:00"
+  },
+  {
+    "$id": "68e6aaa4002a592aeef3",
+    "$createdAt": "2025-10-08T18:17:09.078+00:00",
+    "$updatedAt": "2025-10-08T18:17:36.610+00:00",
+    "name": "Prajakta Joshi",
+    "password": "$argon2id$v=19$m=65536,t=4,p=3$YXJmVWxySTZNQUhpOEFMRQ$CJ1ZYdbrJiWLTOvB+o+0VPeMgl5Jzug9B036NXA8xJQ",
+    "hash": "argon2",
+    "hashOptions": {
+      "type": "argon2",
+      "memoryCost": 2048,
+      "timeCost": 4,
+      "threads": 3
+    },
+    "registration": "2025-10-08T18:17:09.076+00:00",
+    "status": true,
+    "labels": [],
+    "passwordUpdate": "2025-10-08T18:17:09.076+00:00",
+    "email": "prajakta@odysseyts.com",
+    "phone": "",
+    "emailVerification": true,
+    "phoneVerification": false,
+    "mfa": false,
+    "prefs": {},
+    "targets": [
+      {
+        "$id": "68e6aaa51c311d57461f",
+        "$createdAt": "2025-10-08T18:17:09.115+00:00",
+        "$updatedAt": "2025-10-08T18:17:09.115+00:00",
+        "name": "",
+        "userId": "68e6aaa4002a592aeef3",
+        "providerId": null,
+        "providerType": "email",
+        "identifier": "prajakta@odysseyts.com",
+        "expired": false
+      }
+    ],
+    "accessedAt": "2025-10-08T18:17:09.076+00:00"
+  }
+]

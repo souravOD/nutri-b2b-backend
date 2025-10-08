@@ -1,6 +1,9 @@
+// import-appwrite-full.js (ESM)
 import dotenv from "dotenv";
 import fs from "fs-extra";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as readline from "node:readline";
 import {
   Client,
   Databases,
@@ -11,23 +14,25 @@ import {
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const {
   APPWRITE_ENDPOINT,
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
+  // If not provided, we read it from meta/database.json
   APPWRITE_DATABASE_ID,
-  INPUT_DIR = "./appwrite-export",
+  INPUT_DIR = path.join(__dirname, "appwrite-export"),
 } = process.env;
 
 const PAGE_LIMIT = 100;
 
-/** ---- Helpers ---- */
-function assertEnv() {
+function assertEnvImport() {
   const missing = [
     "APPWRITE_ENDPOINT",
     "APPWRITE_PROJECT_ID",
     "APPWRITE_API_KEY",
-    "APPWRITE_DATABASE_ID",
     "INPUT_DIR",
   ].filter((k) => !process.env[k]);
   if (missing.length) throw new Error(`Missing env vars: ${missing.join(", ")}`);
@@ -40,8 +45,206 @@ function buildClient() {
     .setKey(APPWRITE_API_KEY);
 }
 
+async function ensureDatabase(client) {
+  const db = new Databases(client);
+  const metaPath = path.join(INPUT_DIR, "meta", "database.json");
+  const meta = await fs.readJson(metaPath);
+  const databaseId = APPWRITE_DATABASE_ID || meta.$id;
+  const name = meta.name || "Imported DB";
+  const enabled = meta.enabled ?? true;
+
+  try {
+    await db.get(databaseId);
+    console.log(`🗄️ Database exists: ${databaseId}`);
+  } catch (err) {
+    if (err?.code === 404) {
+      console.log(`🆕 Creating database: ${databaseId} (${name})`);
+      await db.create(databaseId, name, enabled);
+    } else {
+      throw err;
+    }
+  }
+
+  return databaseId;
+}
+
+/** === Schema application ===
+ * We support the common attribute/index types via SDK methods.
+ * Relationship attributes are complex and may require manual steps.
+ */
+async function createCollectionFromSchema(db, databaseId, schema) {
+  const { collection, attributes = [], indexes = [] } = schema;
+  const colId = collection.$id;
+  const name = collection.name || colId;
+  const enabled = collection.enabled ?? true;
+  const documentSecurity = collection.documentSecurity ?? false;
+  const permissions = collection.permissions ?? [];
+
+  // 1) Create collection if missing
+  let exists = true;
+  try {
+    await db.getCollection(databaseId, colId);
+  } catch (err) {
+    if (err?.code === 404) exists = false;
+    else throw err;
+  }
+
+  if (!exists) {
+    console.log(`🆕 Creating collection: ${colId}`);
+    await db.createCollection(
+      databaseId,
+      colId,
+      name,
+      permissions,
+      documentSecurity,
+      enabled
+    );
+  } else {
+    console.log(`🧾 Collection exists: ${colId}`);
+  }
+
+  // 2) Ensure attributes
+  // Build a set of existing attribute keys to avoid duplicates
+  const existingAttr = await db.listAttributes(databaseId, colId);
+  const existingKeys = new Set((existingAttr.attributes || []).map(a => a.key));
+
+  for (const attr of attributes) {
+    if (!attr?.key) continue;
+    if (existingKeys.has(attr.key)) continue; // already there
+
+    const key = attr.key;
+    const required = !!attr.required;
+    const isArray = !!attr.array;
+
+    try {
+      switch (attr.type) {
+        case "string":
+          await db.createStringAttribute(
+            databaseId, colId, key, attr.size ?? 255, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "integer":
+          await db.createIntegerAttribute(
+            databaseId, colId, key, required,
+            attr.min ?? undefined, attr.max ?? undefined,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "double":
+        case "float":
+          await db.createFloatAttribute(
+            databaseId, colId, key, required,
+            attr.min ?? undefined, attr.max ?? undefined,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "boolean":
+          await db.createBooleanAttribute(
+            databaseId, colId, key, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "email":
+          await db.createEmailAttribute(
+            databaseId, colId, key, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "url":
+          await db.createUrlAttribute(
+            databaseId, colId, key, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "ip":
+          await db.createIpAttribute(
+            databaseId, colId, key, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        case "enum":
+          await db.createEnumAttribute(
+            databaseId, colId, key, attr.elements ?? [],
+            required, attr.default ?? undefined, isArray
+          );
+          break;
+        case "datetime":
+          await db.createDatetimeAttribute(
+            databaseId, colId, key, required,
+            attr.default ?? undefined, isArray
+          );
+          break;
+        // NOTE: Relationship attributes require special handling and may vary by SDK version.
+        // If encountered, we skip with a warning so you can add manually if needed.
+        case "relationship":
+          console.warn(`⚠️ Skipping relationship attribute '${key}' on ${colId}. Please create it manually after import.`);
+          break;
+        default:
+          console.warn(`⚠️ Unknown/unsupported attribute type '${attr.type}' for '${key}' on ${colId}; skipping.`);
+      }
+    } catch (e) {
+      console.error(`  ✖ Failed to create attribute '${key}' on ${colId}: ${e?.message ?? e}`);
+    }
+  }
+
+  // 2b) Wait for attributes to be ready
+  await waitForAttributesReady(db, databaseId, colId);
+
+  // 3) Ensure indexes
+  const existingIdx = await db.listIndexes(databaseId, colId);
+  const existingIndexKeys = new Set((existingIdx.indexes || []).map(i => i.key));
+
+  for (const idx of indexes) {
+    if (!idx?.key || existingIndexKeys.has(idx.key)) continue;
+
+    try {
+      await db.createIndex(
+        databaseId,
+        colId,
+        idx.key,
+        idx.type,                    // 'key', 'fulltext', 'unique', etc.
+        idx.attributes || [],
+        idx.orders || undefined,
+      );
+    } catch (e) {
+      console.error(`  ✖ Failed to create index '${idx.key}' on ${colId}: ${e?.message ?? e}`);
+    }
+  }
+
+  // 3b) Wait for indexes to be ready
+  await waitForIndexesReady(db, databaseId, colId);
+}
+
+async function waitForAttributesReady(db, databaseId, collectionId, timeoutMs = 120000) {
+  const start = Date.now();
+  while (true) {
+    const resp = await db.listAttributes(databaseId, collectionId);
+    const pending = (resp.attributes || []).filter(a => a.status && a.status !== "available");
+    if (pending.length === 0) return;
+    if (Date.now() - start > timeoutMs) {
+      console.warn(`⏱️ Attribute readiness timeout on ${collectionId}; continuing.`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+async function waitForIndexesReady(db, databaseId, collectionId, timeoutMs = 120000) {
+  const start = Date.now();
+  while (true) {
+    const resp = await db.listIndexes(databaseId, collectionId);
+    const pending = (resp.indexes || []).filter(i => i.status && i.status !== "available");
+    if (pending.length === 0) return;
+    if (Date.now() - start > timeoutMs) {
+      console.warn(`⏱️ Index readiness timeout on ${collectionId}; continuing.`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
 function stripMeta(doc) {
-  // Return data without Appwrite meta keys ($id, $collectionId, etc.)
   const out = {};
   for (const [k, v] of Object.entries(doc)) {
     if (k.startsWith("$")) continue;
@@ -50,156 +253,47 @@ function stripMeta(doc) {
   return out;
 }
 
-async function readJSON(filePath, fallback = []) {
-  if (!(await fs.pathExists(filePath))) return fallback;
-  return fs.readJson(filePath);
-}
-
-async function importUsers(client) {
-  const usersSDK = new Users(client);
-
-  const usersPath = path.join(INPUT_DIR, "users.json");
-  const users = await readJSON(usersPath, []);
-  if (!users.length) {
-    console.log("No users.json found or file empty, skipping users…");
-    return {};
-  }
-
-  console.log(`👥 Importing ${users.length} users…`);
-
-  const idMap = {}; // oldUserId -> newUserId (we preserve IDs, but map anyway)
-
-  for (const u of users) {
-    const userId = u.$id;              // from export
-    const email = u.email || undefined;
-    const name = u.name || undefined;
-
-    // We do NOT know original passwords (and shouldn’t); create temp passwords.
-    const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-
-    try {
-      // Plain-text create (Users.create). node-appwrite supports this signature.
-      // Example from npm docs: users.create(ID.unique(), "email", "+123", "password", "Name")
-      // We keep the original userId for referential integrity.
-      await usersSDK.create(userId, email ?? "", null, tempPassword, name);
-      idMap[userId] = userId;
-
-      // Restore email verification flag if present
-      if (typeof u.emailVerification === "boolean") {
-        await usersSDK.updateEmailVerification(userId, u.emailVerification); // API exists in server SDK
-      }
-
-      // Restore name if needed (some exports may include empty name)
-      if (name && name !== u.name) {
-        await usersSDK.updateName(userId, name);
-      }
-    } catch (err) {
-      if (err?.code === 409) {
-        console.warn(`  ↳ user ${userId} already exists, skipping`);
-        idMap[userId] = userId;
-      } else {
-        console.error(`  ✖ failed user ${userId}:`, err?.message ?? err);
-      }
-    }
-  }
-
-  console.log("✅ Users import finished.");
-  return idMap;
-}
-
-async function importTeamsAndMemberships(client, userIdMap) {
-  const teamsSDK = new Teams(client);
-
-  const teamsPath = path.join(INPUT_DIR, "teams.json");
-  const teams = await readJSON(teamsPath, []);
-  if (!teams.length) {
-    console.log("No teams.json found or file empty, skipping teams…");
-    return;
-  }
-
-  console.log(`👤‍👤 Importing ${teams.length} teams…`);
-
-  // 1) Create teams with same IDs
-  for (const t of teams) {
-    const teamId = t.$id;
-    const name = t.name || "Team";
-    try {
-      await teamsSDK.create(teamId, name);
-    } catch (err) {
-      if (err?.code === 409) {
-        console.warn(`  ↳ team ${teamId} already exists, skipping create`);
-      } else {
-        console.error(`  ✖ failed team ${teamId}:`, err?.message ?? err);
-      }
-    }
-  }
-
-  // 2) Recreate memberships
-  const memberPath = path.join(INPUT_DIR, "team_memberships.json");
-  const teamMemberships = await readJSON(memberPath, []);
-  if (!teamMemberships.length) {
-    console.log("No team_memberships.json found, skipping memberships…");
-    return;
-  }
-
-  console.log(`🔐 Recreating team memberships…`);
-  for (const entry of teamMemberships) {
-    const teamId = entry.teamId;
-    for (const m of entry.memberships || []) {
-      const roles = m.roles || [];
-      const oldUserId = m.userId;
-      const newUserId = userIdMap[oldUserId] || oldUserId;
-      const memberName = m.userName || m.name || undefined;
-
-      try {
-        // Server SDK: providing userId adds immediately without email invite.
-        // (If email-only is provided, server still adds automatically; userId takes priority.) :contentReference[oaicite:1]{index=1}
-        await teamsSDK.createMembership(teamId, roles, undefined, newUserId, undefined, undefined, memberName);
-      } catch (err) {
-        if (err?.code === 409) {
-          console.warn(`  ↳ membership already exists team=${teamId} user=${newUserId}, skipping`);
-        } else if (err?.code === 404) {
-          console.warn(`  ↳ user ${newUserId} not found for team ${teamId}, skipping membership`);
-        } else {
-          console.error(`  ✖ failed membership team=${teamId} user=${newUserId}:`, err?.message ?? err);
-        }
-      }
-    }
-  }
-
-  console.log("✅ Teams & memberships import finished.");
-}
-
-async function importDatabaseDocuments(client) {
+async function importSchemas(client, databaseId) {
   const db = new Databases(client);
+  const schemasDir = path.join(INPUT_DIR, "schemas");
+  const files = (await fs.pathExists(schemasDir)) ? await fs.readdir(schemasDir) : [];
+  const schemaFiles = files.filter(f => f.endsWith(".schema.json"));
 
-  // Scan INPUT_DIR for *.jsonl (each file name is <collectionId>.jsonl)
-  const files = (await fs.pathExists(INPUT_DIR)) ? await fs.readdir(INPUT_DIR) : [];
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-  if (!jsonlFiles.length) {
-    console.log("No .jsonl collection dumps found, skipping DB docs import…");
+  if (!schemaFiles.length) {
+    console.log("ℹ️ No schema files found; assuming DB/collections already exist.");
     return;
   }
 
-  console.log(`🗄️ Importing documents into database ${APPWRITE_DATABASE_ID} from ${jsonlFiles.length} collections…`);
-  for (const file of jsonlFiles) {
-    const collectionId = path.basename(file, ".jsonl");
-    const fullPath = path.join(INPUT_DIR, file);
-    console.log(`↳ Importing ${collectionId} from ${file}`);
+  for (const f of schemaFiles) {
+    const schema = await fs.readJson(path.join(schemasDir, f));
+    await createCollectionFromSchema(db, databaseId, schema);
+  }
 
-    // stream line-by-line to handle large files
-    const rl = require("readline").createInterface({
-      input: fs.createReadStream(fullPath),
+  console.log("✅ Collections & schemas created.");
+}
+
+async function importData(client, databaseId) {
+  const db = new Databases(client);
+  const dataDir = path.join(INPUT_DIR, "data");
+  const files = (await fs.pathExists(dataDir)) ? await fs.readdir(dataDir) : [];
+  const jsonlFiles = files.filter(f => f.endsWith(".jsonl"));
+
+  for (const f of jsonlFiles) {
+    const collectionId = path.basename(f, ".jsonl");
+    console.log(`📥 Importing data for ${collectionId}…`);
+    const rl = readline.createInterface({
+      input: fs.createReadStream(path.join(dataDir, f)),
       crlfDelay: Infinity,
     });
 
     for await (const line of rl) {
-      if (!line.trim()) continue;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
       let doc;
       try {
-        doc = JSON.parse(line);
+        doc = JSON.parse(trimmed);
       } catch (e) {
-        console.warn(`  ⚠️ bad JSON line, skipping: ${line.slice(0, 120)}…`);
+        console.warn(`  ⚠️ bad JSON line, skipping: ${trimmed.slice(0, 120)}…`);
         continue;
       }
 
@@ -208,43 +302,112 @@ async function importDatabaseDocuments(client) {
       const perms = Array.isArray(doc.$permissions) ? doc.$permissions : undefined;
 
       try {
-        // createDocument(databaseId, collectionId, documentId, data, permissions?)
-        await db.createDocument(APPWRITE_DATABASE_ID, collectionId, documentId, data, perms);
-      } catch (err) {
-        if (err?.code === 409) {
-          // Already exists? choose one: skip or update. We’ll update to keep latest.
+        await db.createDocument(databaseId, collectionId, documentId, data, perms);
+      } catch (e) {
+        if (e?.code === 409) {
           try {
-            await db.updateDocument(APPWRITE_DATABASE_ID, collectionId, documentId, data, perms);
-            console.log(`  ↺ updated ${collectionId}/${documentId}`);
+            await db.updateDocument(databaseId, collectionId, documentId, data, perms);
           } catch (e2) {
             console.warn(`  ↳ couldn’t update ${collectionId}/${documentId}: ${e2?.message ?? e2}`);
           }
-        } else if (err?.code === 404) {
-          console.error(`  ✖ collection ${collectionId} not found in target DB. Create it first then rerun.`);
+        } else if (e?.code === 404) {
+          console.error(`  ✖ collection ${collectionId} not found. Check schema import for this collection.`);
         } else {
-          console.error(`  ✖ create ${collectionId}/${documentId} failed:`, err?.message ?? err);
+          console.error(`  ✖ insert ${collectionId}/${documentId} failed: ${e?.message ?? e}`);
         }
       }
     }
   }
 
-  console.log("✅ Database documents import finished.");
+  console.log("✅ Documents import complete.");
 }
 
-/** ---- main ---- */
+async function importUsersTeams(client) {
+  const usersSDK = new Users(client);
+  const teamsSDK = new Teams(client);
+
+  const usersPath = path.join(INPUT_DIR, "auth", "users.json");
+  const teamsPath = path.join(INPUT_DIR, "auth", "teams.json");
+  const membershipsPath = path.join(INPUT_DIR, "auth", "team_memberships.json");
+
+  const users = (await fs.pathExists(usersPath)) ? await fs.readJson(usersPath) : [];
+  const teams = (await fs.pathExists(teamsPath)) ? await fs.readJson(teamsPath) : [];
+  const memberships = (await fs.pathExists(membershipsPath)) ? await fs.readJson(membershipsPath) : [];
+
+  // Users
+  for (const u of users) {
+    const userId = u.$id;
+    const email = u.email || "";
+    const name = u.name || undefined;
+    const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    try {
+      await usersSDK.create(userId, email, null, tempPassword, name);
+      if (typeof u.emailVerification === "boolean") {
+        await usersSDK.updateEmailVerification(userId, u.emailVerification);
+      }
+    } catch (e) {
+      if (e?.code === 409) {
+        // exists, ignore
+      } else {
+        console.error(`  ✖ user ${userId} failed: ${e?.message ?? e}`);
+      }
+    }
+  }
+  console.log(`✅ Users imported (${users.length})`);
+
+  // Teams
+  for (const t of teams) {
+    try {
+      await teamsSDK.create(t.$id, t.name || t.$id);
+    } catch (e) {
+      if (e?.code !== 409) {
+        console.error(`  ✖ team ${t.$id} failed: ${e?.message ?? e}`);
+      }
+    }
+  }
+  console.log(`✅ Teams imported (${teams.length})`);
+
+  // Memberships
+  let count = 0;
+  for (const entry of memberships) {
+    const teamId = entry.teamId;
+    for (const m of entry.memberships || []) {
+      const roles = m.roles || [];
+      const userId = m.userId;
+      const memberName = m.userName || m.name || undefined;
+
+      try {
+        await teamsSDK.createMembership(teamId, roles, undefined, userId, undefined, undefined, memberName);
+        count++;
+      } catch (e) {
+        if (e?.code === 409) continue; // duplicate
+        if (e?.code === 404) {
+          console.warn(`  ↳ user ${userId} or team ${teamId} missing; skip membership`);
+          continue;
+        }
+        console.error(`  ✖ membership team=${teamId}, user=${userId}: ${e?.message ?? e}`);
+      }
+    }
+  }
+  console.log(`✅ Memberships imported (${count})`);
+}
+
 (async function main() {
   try {
-    assertEnv();
+    assertEnvImport();
+
     const client = buildClient();
+    const databaseId = await ensureDatabase(client);
 
-    // 1) Users (returns a map of old->new IDs; we preserve IDs, but mapping kept)
-    const userIdMap = await importUsers(client);
+    // 1) Schemas (collections, attributes, indexes)
+    await importSchemas(client, databaseId);
 
-    // 2) Teams & memberships (requires users present)
-    await importTeamsAndMemberships(client, userIdMap);
+    // 2) Data
+    await importData(client, databaseId);
 
-    // 3) DB documents
-    await importDatabaseDocuments(client);
+    // 3) Users/Teams/Memberships
+    await importUsersTeams(client);
 
     console.log("\n🎉 Import complete.");
   } catch (err) {

@@ -1,0 +1,141 @@
+[
+  {
+    "teamId": "689a07ae00033e4cdfb8",
+    "teamName": "vendor01",
+    "memberships": []
+  },
+  {
+    "teamId": "68a511c7003d69ab5080",
+    "teamName": "admins",
+    "memberships": []
+  },
+  {
+    "teamId": "68a641360008d265511a",
+    "teamName": "odysseyts",
+    "memberships": [
+      {
+        "$id": "68a65581707ce51cd57b",
+        "$createdAt": "2025-08-20T23:08:49.461+00:00",
+        "$updatedAt": "2025-08-20T23:08:49.461+00:00",
+        "userId": "68a655760027dc0d8fa7",
+        "userName": "alex wilson",
+        "userEmail": "sourav.patil@odysseyts.com",
+        "teamId": "68a641360008d265511a",
+        "teamName": "odysseyts",
+        "invited": "2025-08-20T23:08:49.460+00:00",
+        "joined": "2025-08-20T23:08:49.460+00:00",
+        "confirm": true,
+        "mfa": false,
+        "roles": [
+          "viewer"
+        ]
+      },
+      {
+        "$id": "68dd2d14cef8090a34ab",
+        "$createdAt": "2025-10-01T13:31:00.848+00:00",
+        "$updatedAt": "2025-10-01T13:31:00.848+00:00",
+        "userId": "d7c135df-e9cd-4161-91f8-0ae18c803929",
+        "userName": "Sourav",
+        "userEmail": "souravpatil1859@gmail.com",
+        "teamId": "68a641360008d265511a",
+        "teamName": "odysseyts",
+        "invited": "2025-10-01T13:31:00.847+00:00",
+        "joined": "2025-10-01T13:31:00.847+00:00",
+        "confirm": true,
+        "mfa": false,
+        "roles": [
+          "viewer"
+        ]
+      },
+      {
+        "$id": "68deb0e5e6fc719c73b3",
+        "$createdAt": "2025-10-02T17:05:41.946+00:00",
+        "$updatedAt": "2025-10-02T17:05:41.946+00:00",
+        "userId": "68deb0d1002534e717c4",
+        "userName": "Santosh Patil",
+        "userEmail": "sourru1999@gmail.com",
+        "teamId": "68a641360008d265511a",
+        "teamName": "odysseyts",
+        "invited": "2025-10-02T17:05:41.946+00:00",
+        "joined": "2025-10-02T17:05:41.946+00:00",
+        "confirm": true,
+        "mfa": false,
+        "roles": [
+          "viewer"
+        ]
+      },
+      {
+        "$id": "68e6aac1dd3b3e860c89",
+        "$createdAt": "2025-10-08T18:17:37.906+00:00",
+        "$updatedAt": "2025-10-08T18:17:37.906+00:00",
+        "userId": "68e6aaa4002a592aeef3",
+        "userName": "Prajakta Joshi",
+        "userEmail": "prajakta@odysseyts.com",
+        "teamId": "68a641360008d265511a",
+        "teamName": "odysseyts",
+        "invited": "2025-10-08T18:17:37.906+00:00",
+        "joined": "2025-10-08T18:17:37.906+00:00",
+        "confirm": true,
+        "mfa": false,
+        "roles": [
+          "viewer"
+        ]
+      }
+    ]
+  },
+  {
+    "teamId": "68a64ddf000fd2faddb8",
+    "teamName": "walmart",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64de70014d24e7f15",
+    "teamName": "target",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64ded0028d83b385c",
+    "teamName": "kroger",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64df500298691204d",
+    "teamName": "costco",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64dfc003a63860979",
+    "teamName": "wholefoods",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e08002c4dcdf1f9",
+    "teamName": "aldi",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e0e0023c899f7ac",
+    "teamName": "lidl",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e1a002075b012c4",
+    "teamName": "traderjoes",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e220018942070ec",
+    "teamName": "publix",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e2a003536b197eb",
+    "teamName": "heb",
+    "memberships": []
+  },
+  {
+    "teamId": "68a64e310019f9b1459d",
+    "teamName": "albertsons",
+    "memberships": []
+  }
+]

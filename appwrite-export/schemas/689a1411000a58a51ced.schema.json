@@ -1,0 +1,314 @@
+{
+  "collection": {
+    "$id": "689a1411000a58a51ced",
+    "name": "products",
+    "enabled": true,
+    "documentSecurity": false,
+    "permissions": []
+  },
+  "attributes": [
+    {
+      "key": "productId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:36.167+00:00",
+      "$updatedAt": "2025-08-11T16:40:36.394+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "vendorTeamId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:36.826+00:00",
+      "$updatedAt": "2025-08-11T16:40:37.026+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "sku",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:37.507+00:00",
+      "$updatedAt": "2025-08-11T16:40:37.688+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "name",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:38.129+00:00",
+      "$updatedAt": "2025-08-11T16:40:38.324+00:00",
+      "size": 256,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "brand",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:38.784+00:00",
+      "$updatedAt": "2025-08-11T16:40:38.987+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "status",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:40:46.586+00:00",
+      "$updatedAt": "2025-08-11T16:40:46.771+00:00",
+      "elements": [
+        "active",
+        "inactive"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "tags",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": true,
+      "$createdAt": "2025-08-11T16:40:53.669+00:00",
+      "$updatedAt": "2025-08-11T16:40:53.913+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "allergens",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T16:40:54.356+00:00",
+      "$updatedAt": "2025-08-11T16:40:54.601+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "ingredients",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T16:40:55.101+00:00",
+      "$updatedAt": "2025-08-11T16:40:55.300+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "calories",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:06.204+00:00",
+      "$updatedAt": "2025-08-11T16:41:06.402+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "carbs_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:06.844+00:00",
+      "$updatedAt": "2025-08-11T16:41:07.215+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "sugar_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:07.574+00:00",
+      "$updatedAt": "2025-08-11T16:41:07.752+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "fat_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:08.235+00:00",
+      "$updatedAt": "2025-08-11T16:41:08.430+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "sat_fat_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:08.888+00:00",
+      "$updatedAt": "2025-08-11T16:41:09.074+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "protein_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:09.552+00:00",
+      "$updatedAt": "2025-08-11T16:41:09.732+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "fiber_g",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:10.269+00:00",
+      "$updatedAt": "2025-08-11T16:41:10.439+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "sodium_mg",
+      "type": "double",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:10.943+00:00",
+      "$updatedAt": "2025-08-11T16:41:11.132+00:00",
+      "min": -1.7976931348623157e+308,
+      "max": 1.7976931348623157e+308,
+      "default": null
+    },
+    {
+      "key": "metaJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:19.303+00:00",
+      "$updatedAt": "2025-08-11T16:41:19.541+00:00",
+      "size": 8192,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "updatedAt",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:41:26.068+00:00",
+      "$updatedAt": "2025-08-11T16:41:26.269+00:00",
+      "format": "",
+      "default": null
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_1_uniq_vendor_sku",
+      "$createdAt": "2025-08-11T16:41:33.959+00:00",
+      "$updatedAt": "2025-08-11T16:41:34.080+00:00",
+      "key": "uniq_vendor_sku",
+      "type": "unique",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "sku"
+      ],
+      "lengths": [
+        0,
+        0
+      ],
+      "orders": []
+    },
+    {
+      "$id": "8788_1_key_vendor_status",
+      "$createdAt": "2025-08-11T16:41:34.621+00:00",
+      "$updatedAt": "2025-08-11T16:41:34.736+00:00",
+      "key": "key_vendor_status",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "status"
+      ],
+      "lengths": [
+        0,
+        0
+      ],
+      "orders": []
+    },
+    {
+      "$id": "8788_1_ft_name",
+      "$createdAt": "2025-08-11T16:41:35.269+00:00",
+      "$updatedAt": "2025-08-11T16:41:35.691+00:00",
+      "key": "ft_name",
+      "type": "fulltext",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "name"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": []
+    }
+  ]
+}
