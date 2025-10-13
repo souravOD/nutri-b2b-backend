@@ -205,19 +205,37 @@ async function processProductsCSV(
           // Use UPSERT with ON CONFLICT
           await db.execute(sql`
             INSERT INTO products (
-              vendor_id, external_id, name, brand, description, 
+              vendor_id, external_id, name, brand, description,
               category_id, price, currency, status
             )
-            SELECT 
-              vendor_id, external_id, name, brand, description,
-              category_id::uuid, price::numeric, currency, 'active'
-            FROM stg_products 
+            SELECT
+              vendor_id,
+              external_id,
+              name,
+              brand,
+              description,
+              /* Safely cast category_id: allow blank/quoted -> NULL; only cast valid UUIDs */
+              CASE
+                WHEN NULLIF(trim(both '"' from category_id), '') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  THEN (NULLIF(trim(both '"' from category_id), ''))::uuid
+                ELSE NULL
+              END AS category_id,
+              /* Safely cast price: allow blank/quoted -> NULL; only cast numeric */
+              CASE
+                WHEN NULLIF(trim(both '"' from price), '') ~* '^-?\d+(\.\d+)?$'
+                  THEN (NULLIF(trim(both '"' from price), ''))::numeric
+                ELSE NULL
+              END AS price,
+              /* Normalize currency; default to 'USD' if blank */
+              COALESCE(NULLIF(trim(both '"' from currency), ''), 'USD') AS currency,
+              'active' AS status
+            FROM stg_products
             WHERE job_id = ${jobId}
-            AND external_id IS NOT NULL 
-            AND name IS NOT NULL
+              AND external_id IS NOT NULL
+              AND name IS NOT NULL
             LIMIT ${batchSize} OFFSET ${offset}
-            ON CONFLICT (vendor_id, external_id) 
-            DO UPDATE SET 
+            ON CONFLICT (vendor_id, external_id)
+            DO UPDATE SET
               name = EXCLUDED.name,
               brand = EXCLUDED.brand,
               description = EXCLUDED.description,
@@ -355,20 +373,48 @@ async function processCustomersCSV(
         // Merge to live table
         await db.execute(sql`
           INSERT INTO customers (
-            vendor_id, external_id, full_name, email, 
+            vendor_id, external_id, full_name, email,
             dob, age, gender, location, phone
           )
-          SELECT 
-            vendor_id, external_id, full_name, email,
-            dob::date, age::integer, gender::customer_gender, 
-            location::jsonb, phone
-          FROM stg_customers 
+          SELECT
+            vendor_id,
+            external_id,
+            full_name,
+            email,
+            /* Safe casts for optional typed fields */
+            CASE
+              WHEN NULLIF(trim(both '"' from dob), '') IS NOT NULL
+                THEN (NULLIF(trim(both '"' from dob), ''))::date
+              ELSE NULL
+            END AS dob,
+            CASE
+              WHEN NULLIF(trim(both '"' from age), '') ~* '^-?\d+$'
+                THEN (NULLIF(trim(both '"' from age), ''))::integer
+              ELSE NULL
+            END AS age,
+            /* Map 'unknown' -> 'unspecified' to match enum; blank -> NULL */
+            CASE lower(NULLIF(trim(both '"' from gender), ''))
+              WHEN 'male' THEN 'male'::customer_gender
+              WHEN 'female' THEN 'female'::customer_gender
+              WHEN 'other' THEN 'other'::customer_gender
+              WHEN 'unknown' THEN 'unspecified'::customer_gender
+              WHEN 'unspecified' THEN 'unspecified'::customer_gender
+              ELSE NULL
+            END AS gender,
+            /* Location: only cast if looks like JSON (starts with { or [) */
+            CASE
+              WHEN NULLIF(trim(both ' ' from location), '') IS NOT NULL AND left(ltrim(location), 1) IN ('{','[')
+                THEN (location)::jsonb
+              ELSE NULL
+            END AS location,
+            phone
+          FROM stg_customers
           WHERE job_id = ${jobId}
-          AND external_id IS NOT NULL 
-          AND full_name IS NOT NULL
-          AND email IS NOT NULL
-          ON CONFLICT (vendor_id, external_id) 
-          DO UPDATE SET 
+            AND external_id IS NOT NULL
+            AND full_name IS NOT NULL
+            AND email IS NOT NULL
+          ON CONFLICT (vendor_id, external_id)
+          DO UPDATE SET
             full_name = EXCLUDED.full_name,
             email = EXCLUDED.email,
             updated_at = now()
