@@ -1,0 +1,12 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+      "types": ["jest", "node"],
+      "module": "CommonJS",
+      "esModuleInterop": true,
+      "allowJs": true,
+      "skipLibCheck": true
+    },
+    "include": ["jest.setup.ts", "server/**/*.ts", "server/**/*.test.ts", "server/**/__tests__/**/*.ts"]
+  }
+  

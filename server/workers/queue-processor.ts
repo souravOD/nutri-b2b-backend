@@ -1,6 +1,6 @@
-import { queue } from '../lib/queue';
-import { processIngestionJob } from './ingestion';
-import type { QueueJob } from '../lib/queue';
+import { queue } from '../lib/queue.js';
+import { processIngestionJob } from './ingestion.js';
+import type { QueueJob } from '../lib/queue.js';
 
 export class QueueProcessor {
   private running = false;

@@ -4,22 +4,35 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   throw new Error("SUPABASE_URL and SUPABASE_ANON_KEY environment variables are required");
 }
 
+function required(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`[env] Missing ${name}. Put it in your .env`);
+  return v;
+}
+
+const SUPABASE_URL = required("SUPABASE_URL");
+const SUPABASE_SERVICE_ROLE_KEY = required("SUPABASE_SERVICE_ROLE_KEY"); // service-role key (server only)
+
+export const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+  global: { headers: { "X-Client-Info": "nutriapp-b2b-backend" } },
+});
+
 export const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-// Service role client for server-side operations
-export const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
+export async function ensureBucket(name: string) {
+  const { data } = await supabaseAdmin.storage.getBucket(name);
+  if (!data) {
+    await supabaseAdmin.storage.createBucket(name, {
+      public: true,
+      fileSizeLimit: '104857600', // 100MB
+      allowedMimeTypes: ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
+    });
   }
-);
+}
 
 // TUS resumable upload helper
 export async function createResumableUpload(
@@ -31,8 +44,6 @@ export async function createResumableUpload(
     .from(bucket)
     .createSignedUploadUrl(filePath, {
       upsert: true,
-      resumable: true,
-      maxFileSize
     });
 
   if (error) {

@@ -1,8 +1,8 @@
 import crypto from 'crypto';
-import { db } from './database';
+import { db } from './database.js';
 import { webhookEndpoints, webhookDeliveries } from '@shared/schema';
 import { eq } from 'drizzle-orm';
-import { getSecret } from './supabase';
+import { getSecret } from './supabase.js';
 
 export interface WebhookPayload {
   eventType: string;

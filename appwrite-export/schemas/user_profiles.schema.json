@@ -1,0 +1,136 @@
+{
+  "collection": {
+    "$id": "user_profiles",
+    "name": "User Profiles",
+    "enabled": true,
+    "documentSecurity": true,
+    "permissions": [
+      "create(\"users\")",
+      "read(\"users\")",
+      "update(\"users\")",
+      "delete(\"users\")"
+    ]
+  },
+  "attributes": [
+    {
+      "key": "user_id",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-14T21:04:32.286+00:00",
+      "$updatedAt": "2025-08-14T21:04:32.482+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "vendor_id",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-14T21:04:32.467+00:00",
+      "$updatedAt": "2025-08-14T21:04:32.671+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "full_name",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-14T21:04:32.677+00:00",
+      "$updatedAt": "2025-08-14T21:04:32.902+00:00",
+      "size": 80,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "created_at",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-14T21:04:33.072+00:00",
+      "$updatedAt": "2025-08-14T21:04:33.306+00:00",
+      "format": "",
+      "default": null
+    },
+    {
+      "key": "role",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-14T22:39:20.260+00:00",
+      "$updatedAt": "2025-08-14T22:39:20.530+00:00",
+      "size": 32,
+      "default": null,
+      "encrypt": false
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_7_idx_user",
+      "$createdAt": "2025-08-14T21:04:36.498+00:00",
+      "$updatedAt": "2025-08-14T21:04:36.658+00:00",
+      "key": "idx_user",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "user_id"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": [
+        "ASC"
+      ]
+    },
+    {
+      "$id": "8788_7_idx_vendor",
+      "$createdAt": "2025-08-14T21:04:36.702+00:00",
+      "$updatedAt": "2025-08-14T21:04:36.842+00:00",
+      "key": "idx_vendor",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendor_id"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": [
+        "ASC"
+      ]
+    },
+    {
+      "$id": "8788_7_uniq_user_id",
+      "$createdAt": "2025-08-20T22:55:43.457+00:00",
+      "$updatedAt": "2025-08-20T22:55:43.558+00:00",
+      "key": "uniq_user_id",
+      "type": "unique",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "user_id"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": [
+        "ASC"
+      ]
+    }
+  ]
+}

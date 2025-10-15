@@ -6,7 +6,7 @@ import { Download, Shield, User, Bot } from "lucide-react";
 
 export function AuditLogTable() {
   const { data: auditLogs, isLoading } = useQuery({
-    queryKey: ['/api/v1/audit'],
+    queryKey: ['/audit'],
     refetchInterval: 60000, // Refresh every minute
   });
 

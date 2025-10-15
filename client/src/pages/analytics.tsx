@@ -6,7 +6,7 @@ import { TrendingUp, Search, Zap, Database, Clock, Users } from "lucide-react";
 
 export default function Analytics() {
   const { data: metrics, isLoading } = useQuery({
-    queryKey: ['/api/v1/metrics'],
+    queryKey: ['/metrics'],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 

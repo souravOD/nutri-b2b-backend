@@ -4,7 +4,7 @@ import { TrendingUp, Zap, Upload, Activity } from "lucide-react";
 
 export function MetricsGrid() {
   const { data: metrics, isLoading } = useQuery({
-    queryKey: ['/api/v1/metrics'],
+    queryKey: ['/metrics'],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 

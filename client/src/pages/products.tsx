@@ -16,8 +16,17 @@ export default function Products() {
     category: ""
   });
 
-  const { data: products, isLoading } = useQuery({
-    queryKey: ['/api/v1/products', searchQuery, filters],
+  const { data: products, isLoading, error } = useQuery({
+    queryKey: [
+      "/products",
+      {
+        q: searchQuery || undefined,
+        brand: filters.brand || undefined,
+        category_id: filters.category || undefined,
+        status: filters.status || undefined,
+        limit: 50, // optional cap
+      },
+    ],
   });
 
   return (

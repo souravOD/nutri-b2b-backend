@@ -1,0 +1,30 @@
+ # Exclude dev and local files from Docker build context
+.git
+.github
+node_modules
+dist
+.vscode
+.idea
+
+# Env and local secrets
+.env*
+.local
+appwrite_cookies.txt
+
+# OS/Editor
+*.swp
+*.swo
+.DS_Store
+
+# Large assets not needed for runtime
+attached_assets
+products_1000.csv
+sample_1000_products.csv
+appwrite-export
+docs
+aw.jar
+
+# Tests and local tooling
+jest.config.ts
+jest.setup.ts
+scripts

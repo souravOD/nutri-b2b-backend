@@ -9,7 +9,7 @@ import { Plus, Building, Users, Package } from "lucide-react";
 
 export default function Vendors() {
   const { data: vendors, isLoading } = useQuery({
-    queryKey: ['/api/v1/vendors'],
+    queryKey: ['/vendors'],
   });
 
   return (

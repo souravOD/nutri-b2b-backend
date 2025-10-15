@@ -1,0 +1,13 @@
+### HEALTH
+GET http://localhost:5000/health
+
+### HEALTHZ
+GET http://localhost:5000/healthz
+
+### PRODUCTS (requires X-Appwrite-JWT)
+GET http://localhost:5000/products
+X-Appwrite-JWT: {{jwt}}
+
+### JOB STATUS (requires X-Appwrite-JWT)
+GET http://localhost:5000/jobs/{{jobId}}
+X-Appwrite-JWT: {{jwt}}

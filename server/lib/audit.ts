@@ -1,6 +1,6 @@
-import { db } from "./database";
-import { auditLog } from "@shared/schema";
-import type { InsertAuditLogEntry, AuthContext } from "@shared/schema";
+import { db } from "./database.js";
+import { auditLog } from "../../shared/schema.js";
+import type { InsertAuditLogEntry, AuthContext } from "../../shared/schema.js";
 import type { Request } from "express";
 
 export async function auditAction(

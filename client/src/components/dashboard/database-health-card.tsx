@@ -4,7 +4,7 @@ import { AlertCircle, CheckCircle, Clock } from "lucide-react";
 
 export function DatabaseHealthCard() {
   const { data: metrics, isLoading } = useQuery({
-    queryKey: ['/api/v1/metrics'],
+    queryKey: ['/metrics'],
     refetchInterval: 30000,
   });
 

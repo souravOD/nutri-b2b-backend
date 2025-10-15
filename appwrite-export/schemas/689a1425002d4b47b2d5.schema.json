@@ -1,0 +1,140 @@
+{
+  "collection": {
+    "$id": "689a1425002d4b47b2d5",
+    "name": "vendor_mappings",
+    "enabled": true,
+    "documentSecurity": false,
+    "permissions": []
+  },
+  "attributes": [
+    {
+      "key": "vendorTeamId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:45:41.743+00:00",
+      "$updatedAt": "2025-08-11T16:45:41.974+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "target",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:45:42.393+00:00",
+      "$updatedAt": "2025-08-11T16:45:42.617+00:00",
+      "elements": [
+        "products",
+        "customers"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "keyAttr",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:45:43.053+00:00",
+      "$updatedAt": "2025-08-11T16:45:43.248+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "headerMapJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:45:43.785+00:00",
+      "$updatedAt": "2025-08-11T16:45:44.004+00:00",
+      "size": 4096,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "updatedAt",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:45:45.329+00:00",
+      "$updatedAt": "2025-08-11T16:45:45.570+00:00",
+      "format": "",
+      "default": null
+    },
+    {
+      "key": "transformsJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T17:03:41.951+00:00",
+      "$updatedAt": "2025-08-11T17:03:42.160+00:00",
+      "size": 4096,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "defaultsJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T17:03:42.604+00:00",
+      "$updatedAt": "2025-08-11T17:03:42.820+00:00",
+      "size": 2048,
+      "default": null,
+      "encrypt": false
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_3_uniq_vendor_target",
+      "$createdAt": "2025-08-11T16:45:49.905+00:00",
+      "$updatedAt": "2025-08-11T16:45:50.158+00:00",
+      "key": "uniq_vendor_target",
+      "type": "unique",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "target"
+      ],
+      "lengths": [
+        0,
+        0
+      ],
+      "orders": []
+    },
+    {
+      "$id": "8788_3_key_vendor",
+      "$createdAt": "2025-08-11T16:45:50.775+00:00",
+      "$updatedAt": "2025-08-11T16:45:50.902+00:00",
+      "key": "key_vendor",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": []
+    }
+  ]
+}

@@ -9,7 +9,7 @@ import { Upload, Play, Pause, AlertCircle, CheckCircle, Clock, Download } from "
 
 export default function Ingestion() {
   const { data: jobs, isLoading } = useQuery({
-    queryKey: ['/api/v1/jobs'],
+    queryKey: ['/jobs'],
     refetchInterval: 5000, // Poll every 5 seconds for real-time updates
   });
 

@@ -1,75 +1,86 @@
-import { type Request } from "express";
-import { Client } from 'appwrite';
+import type { Request, Response, NextFunction } from "express";
+import { Account, Client } from "appwrite";
+import { db } from "./database.js";
+import { users, userLinks } from "../../shared/schema.js";
+import { eq } from "drizzle-orm";
 
-if (!process.env.APPWRITE_ENDPOINT || !process.env.APPWRITE_PROJECT_ID) {
-  throw new Error("APPWRITE_ENDPOINT and APPWRITE_PROJECT_ID environment variables are required");
+// Augment Express.Request with `auth`
+declare global {
+  namespace Express {
+    interface Request {
+      auth: AuthContext;
+    }
+  }
 }
-
-const client = new Client()
-  .setEndpoint(process.env.APPWRITE_ENDPOINT)
-  .setProject(process.env.APPWRITE_PROJECT_ID);
 
 export interface AuthContext {
   userId: string;
   email: string;
   vendorId: string;
-  role: string;
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
   permissions: string[];
 }
 
-export async function validateJWT(token: string): Promise<AuthContext> {
+const appwriteClient = new Client()
+  .setEndpoint(process.env.APPWRITE_ENDPOINT!)
+  .setProject(process.env.APPWRITE_PROJECT_ID!);
+
+const account = new Account(appwriteClient);
+
+function extractJWT(req: Request): string | null {
+  const h = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
+  if (h?.startsWith("Bearer ")) return h.slice(7);
+  const x = req.headers["x-appwrite-jwt"];
+  return typeof x === "string" ? x : null;
+}
+
+function computePermissions(role: AuthContext["role"]): string[] {
+  if (role === "superadmin") return ["*"];
+  if (role === "vendor_admin")
+    return ["read:vendors","write:vendors","read:products","write:products","read:customers","write:customers","read:ingest","write:ingest","read:matches","read:audit"];
+  if (role === "vendor_operator")
+    return ["read:products","write:products","read:customers","write:customers","read:ingest","write:ingest","read:matches"];
+  return ["read:products","read:customers","read:matches"];
+}
+
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
-    // In a real implementation, this would validate the JWT and extract user info
-    // For now, we'll simulate the validation
-    
-    if (!token || token === 'invalid') {
-      throw new Error('Invalid or missing token');
-    }
+    const jwt = extractJWT(req);
+    if (!jwt) return res.status(401).json({ type:"about:blank", title:"Unauthorized", status:401, detail:"Missing JWT" });
 
-    // Mock user context - in production this would come from JWT claims
-    return {
-      userId: 'user-123',
-      email: 'admin@example.com',
-      vendorId: 'vendor-123',
-      role: 'vendor_admin',
-      permissions: ['read:products', 'write:products', 'read:customers', 'write:customers']
+    // Validate with Appwrite
+    appwriteClient.setJWT(jwt);
+    const me = await account.get(); // throws if invalid
+    const email = (me as any).email as string;
+
+    // Resolve local user and vendor/role
+    const userRow = (await db.select().from(users).where(eq(users.email, email)).limit(1))[0];
+    if (!userRow) return res.status(403).json({ type:"about:blank", title:"Forbidden", status:403, detail:"User not provisioned" });
+
+    const link = (await db.select().from(userLinks).where(eq(userLinks.userId, userRow.id)).limit(1))[0];
+    if (!link) return res.status(403).json({ type:"about:blank", title:"Forbidden", status:403, detail:"No vendor access" });
+
+    (req as any).auth = {
+      userId: userRow.id,
+      email,
+      vendorId: link.vendorId,
+      role: link.role as any,
+      permissions: computePermissions(link.role as any),
     };
-  } catch (error) {
-    throw new Error(`JWT validation failed: ${(error as Error).message}`);
+    next();
+  } catch (err) {
+    console.error("[auth] verification error", err);
+    return res.status(401).json({ type:"about:blank", title:"Unauthorized", status:401, detail:"Invalid JWT" });
   }
-}
-
-export function extractAuthFromRequest(req: Request): string | null {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return null;
-  
-  const [bearer, token] = authHeader.split(' ');
-  if (bearer !== 'Bearer' || !token) return null;
-  
-  return token;
-}
-
-export function requireAuth(req: Request): Promise<AuthContext> {
-  const token = extractAuthFromRequest(req);
-  if (!token) {
-    throw new Error('Authorization token required');
-  }
-  
-  return validateJWT(token);
 }
 
 export function hasPermission(context: AuthContext, permission: string): boolean {
-  return context.permissions.includes(permission) || context.role === 'superadmin';
+  return context.role === "superadmin" || context.permissions.includes("*") || context.permissions.includes(permission);
 }
-
 export function requirePermission(context: AuthContext, permission: string): void {
-  if (!hasPermission(context, permission)) {
-    throw new Error(`Permission denied: ${permission}`);
-  }
+  if (!hasPermission(context, permission)) throw new Error(`Permission denied: ${permission}`);
 }
-
-export function requireRole(context: AuthContext, ...allowedRoles: string[]): void {
-  if (!allowedRoles.includes(context.role) && context.role !== 'superadmin') {
-    throw new Error(`Role not authorized: ${context.role}`);
-  }
+export function requireRole(context: AuthContext, ...allowed: AuthContext["role"][]): void {
+  if (context.role === "superadmin") return;
+  if (!allowed.includes(context.role)) throw new Error(`Role not authorized: ${context.role}`);
 }

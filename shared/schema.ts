@@ -15,6 +15,7 @@ import {
   primaryKey
 } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 // Enums
@@ -88,7 +89,7 @@ export const products = pgTable("products", {
   // Optional fields
   barcode: text("barcode"),
   gtinType: gtinTypeEnum("gtin_type"),
-  ingredients: text("ingredients"),
+  ingredients:  text("ingredients").array(),
   subCategoryId: uuid("sub_category_id"),
   cuisineId: uuid("cuisine_id"),
   marketId: uuid("market_id"),
@@ -155,10 +156,10 @@ export const customerHealthProfiles = pgTable("customer_health_profiles", {
   age: integer("age").notNull(),
   gender: customerGenderEnum("gender").notNull(),
   activityLevel: activityLevelEnum("activity_level").notNull(),
-  conditions: text("conditions").array().notNull().default('{}'),
-  dietGoals: text("diet_goals").array().notNull().default('{}'),
+  conditions: text("conditions").array().notNull().default(sql`'{}'::text[]`),
+  dietGoals: text("diet_goals").array().notNull().default(sql`'{}'::text[]`),
   macroTargets: jsonb("macro_targets").notNull().default('{}'),
-  avoidAllergens: text("avoid_allergens").array().notNull().default('{}'),
+  avoidAllergens: text("avoid_allergens").array().notNull().default(sql`'{}'::text[]`),
   // Derived fields
   bmi: numeric("bmi", { precision: 5, scale: 2 }),
   bmr: numeric("bmr", { precision: 8, scale: 2 }),
@@ -200,7 +201,7 @@ export const taxCategories = pgTable("tax_categories", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: text("code").notNull().unique(),
   label: text("label").notNull(),
-  parentId: uuid("parent_id").references(() => taxCategories.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => taxCategories.id),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`)
@@ -210,7 +211,7 @@ export const taxTags = pgTable("tax_tags", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: text("code").notNull().unique(),
   label: text("label").notNull(),
-  parentId: uuid("parent_id").references(() => taxTags.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => taxTags.id),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`)
@@ -220,7 +221,7 @@ export const taxAllergens = pgTable("tax_allergens", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: text("code").notNull().unique(),
   label: text("label").notNull(),
-  parentId: uuid("parent_id").references(() => taxAllergens.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => taxAllergens.id),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`)
@@ -230,7 +231,7 @@ export const taxCuisines = pgTable("tax_cuisines", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: text("code").notNull().unique(),
   label: text("label").notNull(),
-  parentId: uuid("parent_id").references(() => taxCuisines.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => taxCuisines.id),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`)
@@ -240,7 +241,7 @@ export const taxCertifications = pgTable("tax_certifications", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   code: text("code").notNull().unique(),
   label: text("label").notNull(),
-  parentId: uuid("parent_id").references(() => taxCertifications.id),
+  parentId: uuid("parent_id").references((): AnyPgColumn => taxCertifications.id),
   active: boolean("active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`)

@@ -1,0 +1,193 @@
+{
+  "collection": {
+    "$id": "689a1438000297385137",
+    "name": "vendor_sources",
+    "enabled": true,
+    "documentSecurity": false,
+    "permissions": []
+  },
+  "attributes": [
+    {
+      "key": "vendorTeamId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:09.053+00:00",
+      "$updatedAt": "2025-08-11T16:48:09.333+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "endpoint",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:09.746+00:00",
+      "$updatedAt": "2025-08-11T16:48:10.018+00:00",
+      "format": "url",
+      "default": null
+    },
+    {
+      "key": "authType",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:14.916+00:00",
+      "$updatedAt": "2025-08-11T16:48:15.219+00:00",
+      "elements": [
+        "none",
+        "apiKey",
+        "basic",
+        "bearer",
+        "hmac"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "apiKey",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:15.659+00:00",
+      "$updatedAt": "2025-08-11T16:48:15.962+00:00",
+      "size": 256,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "username",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:16.331+00:00",
+      "$updatedAt": "2025-08-11T16:48:16.558+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "password",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:17.016+00:00",
+      "$updatedAt": "2025-08-11T16:48:17.285+00:00",
+      "size": 256,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "bearerToken",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:17.664+00:00",
+      "$updatedAt": "2025-08-11T16:48:17.906+00:00",
+      "size": 512,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "hmacSecret",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:18.378+00:00",
+      "$updatedAt": "2025-08-11T16:48:18.665+00:00",
+      "size": 512,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "schedule",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:29.339+00:00",
+      "$updatedAt": "2025-08-11T16:48:29.574+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "cursorJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:48:30.002+00:00",
+      "$updatedAt": "2025-08-11T16:48:30.187+00:00",
+      "size": 4096,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "enabled",
+      "type": "boolean",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:55:51.224+00:00",
+      "$updatedAt": "2025-08-11T16:55:51.446+00:00",
+      "default": true
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_4_key_vendor",
+      "$createdAt": "2025-08-11T16:48:42.491+00:00",
+      "$updatedAt": "2025-08-11T16:48:42.606+00:00",
+      "key": "key_vendor",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": []
+    },
+    {
+      "$id": "8788_4_key_vendor_enabled",
+      "$createdAt": "2025-08-11T16:55:58.876+00:00",
+      "$updatedAt": "2025-08-11T16:55:59.000+00:00",
+      "key": "key_vendor_enabled",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "enabled"
+      ],
+      "lengths": [
+        0,
+        0
+      ],
+      "orders": []
+    }
+  ]
+}

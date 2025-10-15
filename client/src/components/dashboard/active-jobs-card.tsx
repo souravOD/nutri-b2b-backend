@@ -7,11 +7,11 @@ import { Building, AlertCircle } from "lucide-react";
 
 export function ActiveJobsCard() {
   const { data: jobs, isLoading } = useQuery({
-    queryKey: ['/api/v1/jobs'],
+    queryKey: ['/jobs'],
     refetchInterval: 5000, // Poll every 5 seconds
   });
 
-  const activeJobs = jobs?.data?.filter((job: any) => 
+  const activeJobs = (jobs as any)?.data?.filter((job: any) => 
     ['running', 'failed'].includes(job.status)
   ) || [];
 

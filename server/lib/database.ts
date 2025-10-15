@@ -1,26 +1,54 @@
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
-import * as schema from "@shared/schema";
+import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL environment variable is required");
+
+function sslFor(url: string | undefined) {
+  // if you use Supabase/remote, keep this as 'require' or 'prefer'
+  // for local dev you can return false
+  return url?.includes(".supabase.co") ? { rejectUnauthorized: false } : false;
 }
 
-const client = postgres(process.env.DATABASE_URL, {
-  max: 20,
-  idle_timeout: 30,
-  connect_timeout: 10,
-});
+const PRIMARY_URL = process.env.DATABASE_URL!;
+const READ_URL = process.env.READ_DATABASE_URL || PRIMARY_URL;
 
-export const db = drizzle(client, { schema });
+function buildPool(url: string) {
+  return new Pool({ connectionString: url, ssl: sslFor(url) });
+}
 
-// Read replica connection (in production, this would be a separate URL)
-const readClient = postgres(process.env.READ_DATABASE_URL || process.env.DATABASE_URL, {
-  max: 10,
-  idle_timeout: 30,
-  connect_timeout: 10,
-});
+const primaryPool = buildPool(PRIMARY_URL);
 
-export const readDb = drizzle(readClient, { schema });
+// Try to create a read pool; if anything goes wrong, reuse primary
+let replicaPool = primaryPool;
+try {
+  if (READ_URL && READ_URL !== PRIMARY_URL) {
+    replicaPool = buildPool(READ_URL);
+  }
+} catch (e) {
+  console.warn("[db] READ_DATABASE_URL invalid; falling back to primary.", e);
+  replicaPool = primaryPool;
+}
 
-export { sql } from "drizzle-orm";
+export const db = drizzle(primaryPool);
+export const readDb = drizzle(replicaPool);
+
+// Optional: log a one-time probe for clarity
+primaryPool
+  .query("select 1")
+  .then(() => console.log("[db] primary connected"))
+  .catch((e) => console.error("[db] primary failed", e));
+
+if (replicaPool !== primaryPool) {
+  replicaPool
+    .query("select 1")
+    .then(() => console.log("[db] read-replica connected"))
+    .catch((e) => console.warn("[db] read-replica failed, using primary instead"));
+}
+
+// optional debug
+// export async function query(text: string, values: any[]) {
+//   if (process.env.DEBUG_SQL) {
+//     console.log("[SQL]", text);
+//     console.log("[SQL params]", values);
+//   }
+//   return pool.query(text, values);
+// }

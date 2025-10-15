@@ -8,7 +8,7 @@ interface TopBarProps {
 
 export function TopBar({ title, subtitle }: TopBarProps) {
   const { data: metrics } = useQuery({
-    queryKey: ['/api/v1/metrics'],
+    queryKey: ['/metrics'],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
