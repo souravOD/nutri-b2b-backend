@@ -587,7 +587,8 @@ export function registerRoutes(app: Express) {
       fullName: b.name ?? b.fullName,    // UI uses "name"
       email: b.email,
       phone: b.phone ?? null,
-      customTags: Array.isArray(b.tags) ? b.tags : [],  // tags[]
+      // accept both `customTags` and legacy `tags`
+      customTags: Array.isArray(b.customTags) ? b.customTags : (Array.isArray(b.tags) ? b.tags : []),
       // optional sync of age/gender to customers table if given in health
       age: b.health?.age ?? null,
       gender: b.health?.gender ?? null,
