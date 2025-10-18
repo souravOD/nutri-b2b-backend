@@ -357,6 +357,7 @@ export function registerRoutes(app: Express) {
       ingredients: toArr(b.ingredients),
 
       sourceUrl: b.source_url ?? b.sourceUrl ?? undefined,
+      notes: b.notes ?? undefined,
     };
 
     Object.keys(updates).forEach(k => (updates as any)[k] === undefined && delete (updates as any)[k]);
@@ -499,6 +500,8 @@ export function registerRoutes(app: Express) {
     const tags = Array.isArray(b.tags) ? b.tags : b.customTags;
     if (tags !== undefined) updates.customTags = tags;
 
+    if (b.notes !== undefined) updates.notes = String(b.notes);
+
     // Location (jsonb)
     if (b.location && typeof b.location === "object") {
       const l = b.location;
@@ -526,6 +529,29 @@ export function registerRoutes(app: Express) {
       console.error("[PATCH /customers/:id]", e);
       return problem(res, 400, e?.message || "Update failed", req);
     }
+  }));
+
+  // Customer-product notes endpoints
+  app.get("/customers/:id/products/:productId/notes", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const row = await (storage as any).getCustomerProductNote(String(req.params.id), String(req.params.productId));
+    return ok(res, row ?? { note: null });
+  }));
+
+  app.patch("/customers/:id/products/:productId/notes", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    const userId   = req.auth?.userId ?? null;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const note = (req.body?.note ?? req.body?.text ?? null) as string | null;
+    const row = await (storage as any).upsertCustomerProductNote(
+      vendorId,
+      String(req.params.id),
+      String(req.params.productId),
+      note,
+      userId,
+    );
+    return ok(res, row);
   }));
 
   // UPSERT health profile for a customer
