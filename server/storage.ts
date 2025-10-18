@@ -3,7 +3,7 @@ import { db } from "./lib/database.js";
 import {
   vendors, users, products, customers,
   customerHealthProfiles, ingestionJobs, auditLog,
-  customerWhitelists, customerBlacklists, customerConsents, matchesCache
+  customerWhitelists, customerBlacklists, customerConsents, matchesCache,
 } from "../shared/schema.js";
 import { eq, and, desc, gte, lte, sql, count } from "drizzle-orm";
 import { calculateHealthMetrics } from "./lib/health.js";
@@ -153,6 +153,19 @@ function genExternalId() {
 }
 
 export class DatabaseStorage implements IStorage {
+  // Feature-detection cache: whether products.notes column exists
+  private _hasProductNotes: boolean | null = null;
+  private async hasProductNotes(): Promise<boolean> {
+    if (this._hasProductNotes != null) return this._hasProductNotes;
+    try {
+      // Robust detection that works across drivers: selecting a non-existent column throws.
+      await db.execute(sql`SELECT notes FROM products LIMIT 0` as any);
+      this._hasProductNotes = true;
+    } catch {
+      this._hasProductNotes = false;
+    }
+    return this._hasProductNotes;
+  }
   
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
@@ -189,10 +202,24 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProducts(vendorId: string, filters?: any): Promise<Product[]> {
-    let q: any = db
-      .select()
-      .from(products)
-      .where(eq(products.vendorId, vendorId));
+    // If the runtime DB is missing newly added optional columns (e.g., products.notes),
+    // fall back to a raw SELECT * so listing doesn't error.
+    if (!(await this.hasProductNotes())) {
+      const clauses: any[] = [sql`vendor_id = ${vendorId}`];
+      if (filters?.status) clauses.push(sql`status = ${filters.status}`);
+      const where = clauses.length ? sql.join(clauses, sql` AND `) : sql`TRUE`;
+      const lim = typeof filters?.limit === 'number' ? Math.max(1, filters.limit) : null;
+      const off = typeof filters?.offset === 'number' ? Math.max(0, filters.offset) : null;
+      const result: any = await db.execute(sql`
+        SELECT * FROM products WHERE ${where}
+        ${lim != null ? sql`LIMIT ${lim}` : sql``}
+        ${off != null ? sql`OFFSET ${off}` : sql``}
+      ` as any);
+      const rows = (result?.rows ?? result) as any[];
+      return rows as any as Product[];
+    }
+
+    let q: any = db.select().from(products).where(eq(products.vendorId, vendorId));
   
     if (filters?.status) {
       q = q.where(eq(products.status, filters.status as Product["status"] as any));
@@ -210,6 +237,13 @@ export class DatabaseStorage implements IStorage {
   
 
   async getProduct(id: string, vendorId: string): Promise<Product | undefined> {
+    if (!(await this.hasProductNotes())) {
+      const result: any = await db.execute(sql`
+        SELECT * FROM products WHERE id = ${id} AND vendor_id = ${vendorId} LIMIT 1
+      ` as any);
+      const rows = (result?.rows ?? result) as any[];
+      return rows?.[0] as any as Product | undefined;
+    }
     const result = await db
       .select()
       .from(products)
@@ -224,6 +258,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateProduct(id: string, vendorId: string, updates: Partial<InsertProduct>): Promise<Product | undefined> {
+    // Avoid referencing a missing column on older DBs
+    if (!(await this.hasProductNotes())) {
+      if ((updates as any).notes !== undefined) delete (updates as any).notes;
+    }
     const result = await db
       .update(products)
       .set({ ...updates, updatedAt: sql`now()` })
@@ -516,6 +554,7 @@ export class DatabaseStorage implements IStorage {
     if (updates.email !== undefined) allowed.email = String(updates.email).trim();
     if (updates.phone !== undefined) allowed.phone = String(updates.phone).trim();
     if (updates.customTags !== undefined) allowed.customTags = updates.customTags; // string[] | null
+    if (updates.notes !== undefined) allowed.notes = updates.notes; // free-form text
     if (updates.updatedBy !== undefined) allowed.updatedBy = updates.updatedBy;
   
     // Nothing to update? Return current row to satisfy the interface type.
@@ -539,6 +578,45 @@ export class DatabaseStorage implements IStorage {
     if (row) console.log('[storage.updateCustomer] post-fetch fullName ->', row.fullName);
   
     return row; // type: Customer | undefined (matches IStorage)
+  }
+
+  // Upsert a customer-product note
+  async upsertCustomerProductNote(
+    vendorId: string,
+    customerId: string,
+    productId: string,
+    note: string | null,
+    userId: string | null,
+  ) {
+    const now = sql`now()`;
+    // Load current map
+    const [row] = await db
+      .select({ productNotes: customers.productNotes })
+      .from(customers)
+      .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
+      .limit(1);
+    if (!row) throw new Error("Customer not found");
+
+    const map: Record<string, any> = (row.productNotes as any) || {};
+    if (note == null || note === "") delete map[productId]; else map[productId] = String(note);
+
+    const [updated] = await db
+      .update(customers)
+      .set({ productNotes: map as any, updatedAt: now as any, updatedBy: userId as any })
+      .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
+      .returning({ productNotes: customers.productNotes });
+
+    return { customerId, productId, note: (updated?.productNotes as any)?.[productId] ?? null } as any;
+  }
+
+  async getCustomerProductNote(customerId: string, productId: string) {
+    const [row] = await db
+      .select({ productNotes: customers.productNotes })
+      .from(customers)
+      .where(eq(customers.id, customerId))
+      .limit(1);
+    const map: Record<string, any> = (row?.productNotes as any) || {};
+    return { customerId, productId, note: map[productId] ?? null } as any;
   }
 
   async deleteCustomer(id: string, vendorId: string): Promise<boolean> {
