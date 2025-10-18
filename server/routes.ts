@@ -946,7 +946,7 @@ export function registerRoutes(app: Express) {
       mode,
       status: "queued",       // enum-safe; we'll flip to "running" in /start
       progressPct: 0,
-      params: { source: "csv" },
+      params: { source: "csv", name: `Import ${mode} CSV` },
     }).returning({ id: schema.ingestionJobs.id });
 
     const jobId = job.id as string;
@@ -1090,15 +1090,190 @@ export function registerRoutes(app: Express) {
     return ok(res, job);
   }));
 
-  // Jobs list (used by the Jobs page)
+  // Job errors (JSON)
+  app.get("/jobs/:id/errors", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId as string | undefined;
+    const jobId = String(req.params.id);
+    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
+
+    // Ensure the job belongs to this vendor
+    const [job] = await db
+      .select({ id: schema.ingestionJobs.id, vendorId: schema.ingestionJobs.vendorId })
+      .from(schema.ingestionJobs)
+      .where(eq(schema.ingestionJobs.id, jobId));
+    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
+
+    const rows = await db
+      .select({
+        id: schema.ingestionJobErrors.id,
+        rowNo: schema.ingestionJobErrors.rowNo,
+        field: schema.ingestionJobErrors.field,
+        code: schema.ingestionJobErrors.code,
+        message: schema.ingestionJobErrors.message,
+        raw: schema.ingestionJobErrors.raw,
+      })
+      .from(schema.ingestionJobErrors)
+      .where(eq(schema.ingestionJobErrors.jobId, jobId));
+
+    return ok(res, { data: rows });
+  }));
+
+  // Job errors CSV download
+  app.get("/jobs/:id/errors.csv", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId as string | undefined;
+    const jobId = String(req.params.id);
+    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
+
+    const [job] = await db
+      .select({ id: schema.ingestionJobs.id, vendorId: schema.ingestionJobs.vendorId })
+      .from(schema.ingestionJobs)
+      .where(eq(schema.ingestionJobs.id, jobId));
+    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
+
+    const rows = await db
+      .select({
+        rowNo: schema.ingestionJobErrors.rowNo,
+        field: schema.ingestionJobErrors.field,
+        code: schema.ingestionJobErrors.code,
+        message: schema.ingestionJobErrors.message,
+        raw: schema.ingestionJobErrors.raw,
+      })
+      .from(schema.ingestionJobErrors)
+      .where(eq(schema.ingestionJobErrors.jobId, jobId));
+
+    const header = ["row_no", "field", "code", "message", "raw"].join(",");
+    const lines = rows.map((r: any) => {
+      const esc = (s: any) => {
+        const str = s == null ? "" : typeof s === "string" ? s : JSON.stringify(s);
+        return '"' + String(str).replaceAll('"', '""') + '"';
+      };
+      return [r.rowNo, r.field ?? "", r.code ?? "", r.message ?? "", esc(r.raw ?? {})].join(",");
+    });
+    const csv = [header, ...lines].join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=job_${jobId}_errors.csv`);
+    return res.status(200).send(csv);
+  }));
+
+  // Export items CSV (best-effort)
+  app.get("/jobs/:id/items.csv", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId as string | undefined;
+    const jobId = String(req.params.id);
+    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
+
+    const [job] = await db
+      .select()
+      .from(schema.ingestionJobs)
+      .where(eq(schema.ingestionJobs.id, jobId));
+    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
+
+    const mode = String(job.mode || "products");
+    let header = "";
+    let rows: any[] = [];
+
+    if (mode === "products") {
+      // Try staging first (may be deleted post-merge)
+      rows = await db
+        .select({
+          externalId: schema.stgProducts.externalId,
+          name: schema.stgProducts.name,
+          brand: schema.stgProducts.brand,
+          categoryId: schema.stgProducts.categoryId,
+          price: schema.stgProducts.price,
+          currency: schema.stgProducts.currency,
+        })
+        .from(schema.stgProducts)
+        .where(eq(schema.stgProducts.jobId, jobId));
+      header = "external_id,name,brand,category_id,price,currency";
+    } else if (mode === "customers") {
+      rows = await db
+        .select({
+          externalId: schema.stgCustomers.externalId,
+          fullName: schema.stgCustomers.fullName,
+          email: schema.stgCustomers.email,
+          phone: schema.stgCustomers.phone,
+        })
+        .from(schema.stgCustomers)
+        .where(eq(schema.stgCustomers.jobId, jobId));
+      header = "external_id,full_name,email,phone";
+    } else {
+      return res.status(501).json({ message: `Export not implemented for mode ${mode}` });
+    }
+
+    const esc = (s: any) => '"' + String(s ?? "").replaceAll('"', '""') + '"';
+    const csvLines = [header];
+    if (mode === "products") {
+      csvLines.push(...rows.map((r: any) => [r.externalId, r.name, r.brand, r.categoryId, r.price, r.currency].map(esc).join(",")));
+    } else {
+      csvLines.push(...rows.map((r: any) => [r.externalId, r.fullName, r.email, r.phone].map(esc).join(",")));
+    }
+
+    if (rows.length === 0) {
+      csvLines.push('"No staging rows available for this job (the worker may have already cleaned up)."');
+    }
+
+    const out = csvLines.join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=job_${jobId}_items.csv`);
+    return res.status(200).send(out);
+  }));
+
+  // Jobs list (used by the Jobs page and Search)
   app.get("/jobs", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId as string;
-    const items = await db.select().from(schema.ingestionJobs)
-      .where(eq(schema.ingestionJobs.vendorId, vendorId))
-      .orderBy(desc(schema.ingestionJobs.createdAt ?? sql`now()`)) // adjust if column name differs
-      .limit(100);
+    const qRaw = (req.query.q as string) ?? "";
+    const q = qRaw.trim().toLowerCase();
+    const statusUi = (req.query.status as string) || undefined;
+    const typeUi = (req.query.type as string) || undefined; // Import|Export|Match (currently only Import maps)
+    const limitRaw = Number(req.query.limit ?? 100);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, limitRaw)) : 100;
 
-    return ok(res, { data: items, page: 1, pageSize: items.length, total: items.length });
+    // Map UI status to DB enum
+    const statusMap: Record<string, string> = {
+      running: "running",
+      completed: "completed",
+      failed: "failed",
+      pending: "queued",
+      queued: "queued",
+      processing: "running",
+    };
+    const dbStatus = statusUi ? statusMap[String(statusUi).toLowerCase()] : undefined;
+
+    // Base query scoped to vendor
+    let base = await db.select().from(schema.ingestionJobs)
+      .where(eq(schema.ingestionJobs.vendorId, vendorId))
+      .orderBy(desc(schema.ingestionJobs.createdAt ?? sql`now()`))
+      .limit(limit);
+
+    // In-memory filters for q/type/status (cheap list)
+    if (dbStatus) {
+      base = base.filter((j: any) => String(j.status).toLowerCase() === dbStatus);
+    }
+    if (typeUi) {
+      const t = String(typeUi).toLowerCase();
+      // Today: products/customers/api_sync -> Import; keep flexible for future mapping
+      base = base.filter((j: any) =>
+        (t === "import" && ["products","customers","api_sync"].includes(String(j.mode).toLowerCase()))
+        || (t === "match" && String(j.mode).toLowerCase().includes("match"))
+        || (t === "export" && String(j.mode).toLowerCase().includes("export"))
+      );
+    }
+    if (q) {
+      base = base.filter((j: any) => {
+        const created = j.createdAt ? new Date(j.createdAt).toISOString().toLowerCase() : "";
+        const p = (j.params || {}) as any;
+        return (
+          String(j.id).toLowerCase().includes(q)
+          || String(j.mode ?? "").toLowerCase().includes(q)
+          || String(j.status ?? "").toLowerCase().includes(q)
+          || String(p?.source ?? "").toLowerCase().includes(q)
+          || String(p?.name ?? "").toLowerCase().includes(q)
+          || created.includes(q)
+        );
+      });
+    }
+
+    return ok(res, { data: base, page: 1, pageSize: base.length, total: base.length });
   }));
 
   // database health (if implemented)
