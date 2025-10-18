@@ -101,6 +101,8 @@ export const products = pgTable("products", {
   certifications: text("certifications").array(),
   regulatoryCodes: text("regulatory_codes").array(),
   sourceUrl: text("source_url"),
+  // Global vendor-scoped notes per product
+  notes: text("notes"),
   softDeletedAt: timestamp("soft_deleted_at")
 }, (table) => ({
   uniqueVendorExternal: uniqueIndex("unique_vendor_external_id").on(table.vendorId, table.externalId),
@@ -142,6 +144,10 @@ export const customers = pgTable("customers", {
   // Optional fields
   phone: text("phone"),
   customTags: text("custom_tags").array(),
+  // Simple free-form notes per customer
+  notes: text("notes"),
+  // JSON map of productId -> note string (per customer)
+  productNotes: jsonb("product_notes").default('{}'),
   searchTsv: text("search_tsv"),
   createdBy: uuid("created_by"),
   updatedBy: uuid("updated_by")
