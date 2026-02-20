@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TrendingUp, Zap, Upload, Activity } from "lucide-react";
 
 export function MetricsGrid() {
-  const { data: metrics, isLoading } = useQuery({
+  const { data: metrics, isLoading } = useQuery<any>({
     queryKey: ['/metrics'],
     refetchInterval: 30000, // Refresh every 30 seconds
   });

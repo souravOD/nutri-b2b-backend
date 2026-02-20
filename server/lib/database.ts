@@ -10,9 +10,16 @@ function sslFor(url: string | undefined) {
 
 const PRIMARY_URL = process.env.DATABASE_URL!;
 const READ_URL = process.env.READ_DATABASE_URL || PRIMARY_URL;
+// Keep public first to avoid accidental unqualified writes into gold.
+// Gold tables must always be referenced explicitly in raw SQL.
+const SEARCH_PATH = "public";
 
 function buildPool(url: string) {
-  return new Pool({ connectionString: url, ssl: sslFor(url) });
+  return new Pool({
+    connectionString: url,
+    ssl: sslFor(url),
+    options: `-c search_path=${SEARCH_PATH}`,
+  });
 }
 
 const primaryPool = buildPool(PRIMARY_URL);
@@ -33,14 +40,14 @@ export const readDb = drizzle(replicaPool);
 
 // Optional: log a one-time probe for clarity
 primaryPool
-  .query("select 1")
-  .then(() => console.log("[db] primary connected"))
+  .query("select current_setting('search_path') as search_path")
+  .then((r) => console.log(`[db] primary connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
   .catch((e) => console.error("[db] primary failed", e));
 
 if (replicaPool !== primaryPool) {
   replicaPool
-    .query("select 1")
-    .then(() => console.log("[db] read-replica connected"))
+    .query("select current_setting('search_path') as search_path")
+    .then((r) => console.log(`[db] read-replica connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
     .catch((e) => console.warn("[db] read-replica failed, using primary instead"));
 }
 

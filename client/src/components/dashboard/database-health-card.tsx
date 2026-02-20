@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, CheckCircle, Clock } from "lucide-react";
 
 export function DatabaseHealthCard() {
-  const { data: metrics, isLoading } = useQuery({
+  const { data: metrics, isLoading } = useQuery<any>({
     queryKey: ['/metrics'],
     refetchInterval: 30000,
   });

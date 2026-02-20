@@ -16,7 +16,7 @@ export default function Products() {
     category: ""
   });
 
-  const { data: products, isLoading, error } = useQuery({
+  const { data: products, isLoading, error } = useQuery<any>({
     queryKey: [
       "/products",
       {

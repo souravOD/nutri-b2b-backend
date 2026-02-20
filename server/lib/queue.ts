@@ -18,7 +18,7 @@ export class PostgresQueue {
   /** Optional helper: push an existing job back to queued state */
   async enqueueExisting(jobId: string): Promise<void> {
     await db.execute(sql`
-      UPDATE ingestion_jobs
+      UPDATE public.ingestion_jobs
       SET status = 'queued', started_at = NULL
       WHERE id = ${jobId}::uuid
     `);
@@ -30,14 +30,14 @@ export class PostgresQueue {
     const result = await db.execute(sql`
       WITH one AS (
         SELECT id
-        FROM ingestion_jobs
+        FROM public.ingestion_jobs
         WHERE status = 'queued'
           AND COALESCE(params->>'uploaded','false') = 'true'
         ORDER BY created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
-      UPDATE ingestion_jobs j
+      UPDATE public.ingestion_jobs j
       SET status = 'running', started_at = NOW()
       FROM one
       WHERE j.id = one.id
@@ -71,7 +71,7 @@ export class PostgresQueue {
   async markFailed(jobId: string, errorMessage: string, shouldRetry = false): Promise<void> {
     if (shouldRetry) {
       await db.execute(sql`
-        UPDATE ingestion_jobs
+        UPDATE public.ingestion_jobs
         SET status = 'queued',
             attempt = attempt + 1,
             started_at = NULL

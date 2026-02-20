@@ -1,12 +1,28 @@
 import type { Express, Request, Response, NextFunction, RequestHandler } from "express";
 import { storage } from "./storage.js";
-import { requireAuth } from "./lib/auth.js";
+import { extractJWT, requireAuth } from "./lib/auth.js";
 import { and, eq, desc, sql } from "drizzle-orm";
 import * as schema from "../shared/schema.js";
 import { db } from "./lib/database.js";
 import { supabaseAdmin } from "./lib/supabase.js";     // service-role client
 import { queue } from "./lib/queue.js";                // your job queue
 import { randomUUID } from "crypto";
+import {
+  addCreatorAsTeamAdmin,
+  appwriteVendorSlugExists,
+  createAppwriteTeam,
+  createAppwriteVendorDocument,
+  deleteAppwriteTeam,
+  deleteAppwriteVendorDocument,
+  getCurrentAppwriteUserFromJwt,
+} from "./lib/appwriteAdmin.js";
+import {
+  deriveDomainFromEmail,
+  isReservedVendorSlug,
+  slugifyVendorName,
+  withSlugSuffix,
+} from "./lib/vendors.js";
+import { validateVendorRegistrationInput } from "./lib/validators/vendorRegistration.js";
 import Busboy from 'busboy';
 import { createClient } from "@supabase/supabase-js";
 import multer from "multer";
@@ -20,6 +36,9 @@ const uploadMw = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB
 });
+
+const JOBS_ENABLED = process.env.B2B_ENABLE_JOBS === "1";
+const MATCHING_ENABLED = process.env.B2B_ENABLE_MATCHING === "1";
 
 
 // const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -112,6 +131,78 @@ const withScorePct = (p: any) => {
   return { ...p, _score: raw01, score_pct: pct };
 };
 
+function toGoldProductStatus(status?: string): "active" | "discontinued" | "out_of_stock" {
+  const s = String(status || "active").toLowerCase();
+  if (s === "inactive" || s === "discontinued") return "discontinued";
+  if (s === "out_of_stock") return "out_of_stock";
+  return "active";
+}
+
+function toUiProductStatus(status?: string): "active" | "inactive" {
+  const s = String(status || "active").toLowerCase();
+  return s === "active" ? "active" : "inactive";
+}
+
+function toGoldCustomerStatus(status?: string): "active" | "inactive" | "suspended" {
+  const s = String(status || "active").toLowerCase();
+  if (s === "archived") return "inactive";
+  if (s === "inactive") return "inactive";
+  if (s === "suspended") return "suspended";
+  return "active";
+}
+
+function toUiCustomerStatus(status?: string): "active" | "archived" {
+  const s = String(status || "active").toLowerCase();
+  return s === "active" ? "active" : "archived";
+}
+
+function toGoldActivityLevel(activity?: string): "sedentary" | "lightly_active" | "moderately_active" | "very_active" | "extra_active" {
+  const a = String(activity || "sedentary").toLowerCase();
+  if (a === "light" || a === "lightly_active") return "lightly_active";
+  if (a === "moderate" || a === "moderately_active") return "moderately_active";
+  if (a === "very" || a === "very_active") return "very_active";
+  if (a === "extra" || a === "extra_active") return "extra_active";
+  return "sedentary";
+}
+
+function toUiActivityLevel(activity?: string): "sedentary" | "light" | "moderate" | "very" | "extra" {
+  const a = String(activity || "sedentary").toLowerCase();
+  if (a === "lightly_active" || a === "light") return "light";
+  if (a === "moderately_active" || a === "moderate") return "moderate";
+  if (a === "very_active" || a === "very") return "very";
+  if (a === "extra_active" || a === "extra") return "extra";
+  return "sedentary";
+}
+
+function mapProductForApi(row: any) {
+  if (!row) return row;
+  return {
+    ...row,
+    status: toUiProductStatus(row.status),
+  };
+}
+
+function mapCustomerForApi(row: any) {
+  if (!row) return row;
+  const mapped = {
+    ...row,
+    status: toUiCustomerStatus(row.accountStatus ?? row.account_status ?? row.status),
+    account_status: row.accountStatus ?? row.account_status ?? null,
+  } as any;
+
+  if (mapped.healthProfile) {
+    mapped.healthProfile = {
+      ...mapped.healthProfile,
+      activityLevel: toUiActivityLevel(
+        mapped.healthProfile.activityLevel ?? mapped.healthProfile.activity_level
+      ),
+      activity_level: mapped.healthProfile.activityLevel ?? mapped.healthProfile.activity_level,
+    };
+  }
+
+  return mapped;
+}
+
 function problem(res: Response, status: number, detail: string, req: Request) {
   return res
     .status(status)
@@ -123,6 +214,45 @@ function problem(res: Response, status: number, detail: string, req: Request) {
       detail,
       instance: req.path,
     });
+}
+
+function adminError(res: Response, status: number, code: string, message: string, detail?: any) {
+  return res.status(status).json({
+    ok: false,
+    code,
+    message,
+    ...(detail ? { detail } : {}),
+  });
+}
+
+async function slugExistsInSupabase(slug: string): Promise<boolean> {
+  const out = await db.execute(sql`
+    SELECT 1
+    FROM gold.vendors
+    WHERE lower(slug) = lower(${slug})
+    LIMIT 1
+  `);
+  return (out.rows || []).length > 0;
+}
+
+async function resolveUniqueVendorSlug(companyName: string): Promise<string> {
+  const baseSlug = slugifyVendorName(companyName);
+  if (isReservedVendorSlug(baseSlug)) {
+    throw new Error("Generated slug is reserved.");
+  }
+
+  for (let attempt = 1; attempt <= 1000; attempt++) {
+    const candidate = withSlugSuffix(baseSlug, attempt);
+    if (isReservedVendorSlug(candidate)) continue;
+
+    const [inAppwrite, inSupabase] = await Promise.all([
+      appwriteVendorSlugExists(candidate),
+      slugExistsInSupabase(candidate),
+    ]);
+    if (!inAppwrite && !inSupabase) return candidate;
+  }
+
+  throw new Error("Unable to generate a unique vendor slug.");
 }
 
 /**
@@ -160,8 +290,12 @@ export function registerRoutes(app: Express) {
     const vendorId = req.auth?.vendorId ?? null;
 
     if (typeof s.getSystemMetrics === "function") {
-      const metrics = await s.getSystemMetrics(vendorId);
-      return ok(res, metrics);
+      try {
+        const metrics = await s.getSystemMetrics(vendorId);
+        return ok(res, metrics);
+      } catch (e: any) {
+        console.warn("[metrics] fallback:", e?.message || e);
+      }
     }
 
     // fallback stub so the page renders
@@ -177,49 +311,263 @@ export function registerRoutes(app: Express) {
   app.get("/vendors", withAuth(async (req: any, res) => {
     const s: any = storage as any;
     if (typeof s.getVendors === "function") {
-      const vendors = await s.getVendors();
-      return ok(res, { data: vendors });
+      try {
+        const vendors = await s.getVendors();
+        return ok(res, { data: vendors });
+      } catch (e: any) {
+        console.warn("[vendors] fallback:", e?.message || e);
+      }
     }
     return ok(res, { data: [] }); // empty list is fine for the Vendors page
   }));
 
+  app.post("/admin/vendors/register", withAuth(async (req: any, res) => {
+    const traceId = randomUUID();
+    const auth = req.auth;
+
+    if (auth?.role !== "superadmin") {
+      return adminError(res, 403, "forbidden", "Only superadmin can register vendors.");
+    }
+
+    const validated = validateVendorRegistrationInput(req.body ?? {});
+    if (!validated.ok) {
+      return adminError(res, 400, "invalid_input", validated.message);
+    }
+
+    const jwt = extractJWT(req);
+    if (!jwt) {
+      return adminError(res, 401, "invalid_token", "Missing Appwrite JWT.");
+    }
+
+    let appwriteUser: { id: string; email: string; name: string | null };
+    try {
+      appwriteUser = await getCurrentAppwriteUserFromJwt(jwt);
+    } catch (err: any) {
+      return adminError(res, 401, "invalid_token", err?.message || "Invalid Appwrite JWT.");
+    }
+
+    const input = validated.data;
+    const domain = deriveDomainFromEmail(input.billingEmail);
+    if (!domain) {
+      return adminError(res, 400, "invalid_input", "billingEmail must contain a valid domain.");
+    }
+
+    let createdTeamId: string | null = null;
+    let createdVendorDocId: string | null = null;
+    let resolvedSlug = "";
+
+    try {
+      resolvedSlug = await resolveUniqueVendorSlug(input.companyName);
+
+      const team = await createAppwriteTeam(input.companyName);
+      createdTeamId = team.teamId;
+
+      try {
+        await addCreatorAsTeamAdmin(team.teamId, appwriteUser.id, appwriteUser.name);
+      } catch (err: any) {
+        try {
+          await deleteAppwriteTeam(team.teamId);
+        } catch {
+          // no-op best effort rollback
+        }
+        console.error(
+          JSON.stringify({
+            trace_id: traceId,
+            code: "appwrite_membership_create_failed",
+            slug: resolvedSlug,
+            team_id: team.teamId,
+            owner_user_id: appwriteUser.id,
+            rollback: true,
+            error: err?.message || String(err),
+          })
+        );
+        return adminError(res, 502, "appwrite_membership_create_failed", "Failed to add creator as team admin.");
+      }
+
+      const appwriteVendorPayload = {
+        name: input.companyName,
+        slug: resolvedSlug,
+        billing_email: input.billingEmail,
+        owner_user_id: appwriteUser.id,
+        created_at: new Date().toISOString(),
+        status: "active" as const,
+        team_id: team.teamId,
+        domains: [domain],
+        ...(input.phone ? { phone: input.phone } : {}),
+        ...(input.country ? { country: input.country } : {}),
+        ...(input.timezone ? { timezone: input.timezone } : {}),
+      };
+
+      try {
+        const doc = await createAppwriteVendorDocument(appwriteVendorPayload);
+        createdVendorDocId = doc.documentId;
+      } catch (err: any) {
+        try {
+          await deleteAppwriteTeam(team.teamId);
+        } catch {
+          // no-op best effort rollback
+        }
+        console.error(
+          JSON.stringify({
+            trace_id: traceId,
+            code: "appwrite_vendor_create_failed",
+            slug: resolvedSlug,
+            team_id: team.teamId,
+            owner_user_id: appwriteUser.id,
+            rollback: true,
+            error: err?.message || String(err),
+          })
+        );
+        return adminError(res, 502, "appwrite_vendor_create_failed", "Failed to create vendor document in Appwrite.");
+      }
+
+      try {
+        const inserted = await db.execute(sql`
+          INSERT INTO gold.vendors (
+            name,
+            slug,
+            status,
+            team_id,
+            domains,
+            owner_user_id,
+            billing_email,
+            contact_email,
+            phone,
+            country,
+            timezone
+          )
+          VALUES (
+            ${input.companyName},
+            ${resolvedSlug},
+            'active',
+            ${team.teamId},
+            ${textArray([domain])},
+            ${appwriteUser.id},
+            ${input.billingEmail},
+            ${input.billingEmail},
+            ${input.phone},
+            ${input.country},
+            ${input.timezone}
+          )
+          RETURNING id, name, slug, team_id, domains
+        `);
+
+        const vendor = inserted.rows?.[0] as any;
+        console.info(
+          JSON.stringify({
+            trace_id: traceId,
+            code: "vendor_registered",
+            slug: resolvedSlug,
+            team_id: team.teamId,
+            owner_user_id: appwriteUser.id,
+            rollback: false,
+          })
+        );
+
+        return res.status(201).json({
+          ok: true,
+          vendor: {
+            id: vendor.id,
+            slug: vendor.slug,
+            name: vendor.name,
+            team_id: vendor.team_id,
+            domains: vendor.domains || [domain],
+          },
+          appwrite: {
+            vendor_doc_id: createdVendorDocId,
+            team_id: team.teamId,
+          },
+        });
+      } catch (err: any) {
+        let rollbackError = "";
+        try {
+          if (createdVendorDocId) await deleteAppwriteVendorDocument(createdVendorDocId);
+        } catch (rollbackErr: any) {
+          rollbackError = `vendor_doc_rollback_failed:${rollbackErr?.message || String(rollbackErr)}`;
+        }
+        try {
+          if (createdTeamId) await deleteAppwriteTeam(createdTeamId);
+        } catch (rollbackErr: any) {
+          rollbackError = rollbackError
+            ? `${rollbackError};team_rollback_failed:${rollbackErr?.message || String(rollbackErr)}`
+            : `team_rollback_failed:${rollbackErr?.message || String(rollbackErr)}`;
+        }
+
+        console.error(
+          JSON.stringify({
+            trace_id: traceId,
+            code: "supabase_insert_failed_rolled_back",
+            slug: resolvedSlug,
+            team_id: createdTeamId,
+            owner_user_id: appwriteUser.id,
+            rollback: true,
+            rollback_error: rollbackError || null,
+            error: err?.message || String(err),
+          })
+        );
+
+        return adminError(
+          res,
+          500,
+          "supabase_insert_failed_rolled_back",
+          "Failed to persist vendor in Supabase. Appwrite changes were rolled back.",
+          rollbackError ? { rollback_error: rollbackError } : undefined
+        );
+      }
+    } catch (err: any) {
+      console.error(
+        JSON.stringify({
+          trace_id: traceId,
+          code: "appwrite_team_create_failed",
+          slug: resolvedSlug || null,
+          team_id: createdTeamId,
+          owner_user_id: appwriteUser.id,
+          rollback: Boolean(createdTeamId),
+          error: err?.message || String(err),
+        })
+      );
+      return adminError(res, 502, "appwrite_team_create_failed", err?.message || "Failed to create Appwrite team.");
+    }
+  }));
+
   // products (list/search)
   app.get("/products", withAuth(async (req: any, res) => {
-    const s: any = storage as any;
-    const vendorId = req.auth?.vendorId;
-  
-    const page  = Math.max(1, parseInt((req.query.page  as string) || "1"));
-    const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50")));
-  
-    const q          = (req.query.q as string) || undefined;
-    const brand      = (req.query.brand as string) || undefined;
-    const status     = (req.query.status as string) || undefined;
-    const categoryId = (req.query.category_id as string) || undefined;
-  
-    // If there's a search term or any filter, use the search path
-    if ((q || brand || status || categoryId) && typeof s.searchProducts === "function") {
-      // NOTE: if your searchProducts signature is (vendorId, q, opts), this works.
-      // If your impl expects a single object, change to: s.searchProducts(vendorId, { q, brand, status, categoryId, page, pageSize: limit })
-      const itemsOrResult = await s.searchProducts(
-        vendorId,
-        q,
-        { brand, status, categoryId, page, pageSize: limit }
-      );
-  
-      // Normalize to { data, page, pageSize, total }
-      const data  = (itemsOrResult?.items ?? itemsOrResult) || [];
-      const total = itemsOrResult?.total ?? (Array.isArray(data) ? data.length : 0);
-  
-      return ok(res, { data, page, pageSize: limit, total });
+    try {
+      const s: any = storage as any;
+      const vendorId = req.auth?.vendorId;
+    
+      const page  = Math.max(1, parseInt((req.query.page  as string) || "1"));
+      const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50")));
+    
+      const q          = (req.query.q as string) || undefined;
+      const brand      = (req.query.brand as string) || undefined;
+      const status     = (req.query.status as string) || undefined;
+      const categoryId = (req.query.category_id as string) || undefined;
+    
+      // If there's a search term or any filter, use the search path
+      if ((q || brand || status || categoryId) && typeof s.searchProducts === "function") {
+        const itemsOrResult = await s.searchProducts(
+          vendorId,
+          q,
+          { brand, status, categoryId, page, pageSize: limit }
+        );
+    
+        const data  = (itemsOrResult?.items ?? itemsOrResult) || [];
+        const total = itemsOrResult?.total ?? (Array.isArray(data) ? data.length : 0);
+
+        return ok(res, { data: Array.isArray(data) ? data.map(mapProductForApi) : [], page, pageSize: limit, total });
+      }
+    
+      if (typeof s.getProducts === "function") {
+        const result = await s.getProducts(vendorId, { page, pageSize: limit });
+        const data = Array.isArray(result) ? result.map(mapProductForApi) : [];
+        return ok(res, data);
+      }
+    
+      return ok(res, { data: [], page, pageSize: limit, total: 0 });
+    } catch (err: any) {
+      return problem(res, 500, err?.message || "Failed to load products", req);
     }
-  
-    // Fallback: plain list (no search/filter)
-    if (typeof s.getProducts === "function") {
-      const result = await s.getProducts(vendorId, { page, pageSize: limit });
-      return ok(res, result);
-    }
-  
-    return ok(res, { data: [], page, pageSize: limit, total: 0 });
   }));
 
   // product by id
@@ -229,7 +577,7 @@ export function registerRoutes(app: Express) {
     if (typeof s.getProduct === "function") {
       const product = await s.getProduct(req.params.id, vendorId);
       if (!product) return problem(res, 404, "Product not found", req);
-      return ok(res, product);
+      return ok(res, mapProductForApi(product));
     }
     return problem(res, 404, "Product not found", req);
   }));
@@ -268,7 +616,7 @@ export function registerRoutes(app: Express) {
       name,
       description: b.description ?? null,
       brand: b.brand ?? null,
-      status: (b.status ?? "active") as any,                // product_status enum: "active" | "inactive"
+      status: toGoldProductStatus(b.status ?? "active"),
 
       categoryId: b.category_id ?? b.categoryId ?? null,
       subCategoryId: b.sub_category_id ?? b.subCategoryId ?? null,
@@ -299,7 +647,7 @@ export function registerRoutes(app: Express) {
 
     try {
       const created = await storage.createProducts([insert]);
-      return res.status(201).json(created[0]);
+      return res.status(201).json(mapProductForApi(created[0]));
     } catch (e: any) {
       console.error("[POST /products]", e);
       return problem(res, 400, e?.message || "Create failed", req);
@@ -331,7 +679,7 @@ export function registerRoutes(app: Express) {
       name: b.name ?? undefined,
       description: b.description ?? undefined,
       brand: b.brand ?? undefined,
-      status: (b.status ?? undefined) as any,
+      status: b.status !== undefined ? toGoldProductStatus(b.status) : undefined,
 
       categoryId: b.category_id ?? b.categoryId ?? undefined,
       subCategoryId: b.sub_category_id ?? b.subCategoryId ?? undefined,
@@ -367,7 +715,7 @@ export function registerRoutes(app: Express) {
       if (typeof s.updateProduct !== "function") return problem(res, 404, "Update not supported", req);
       const updated = await s.updateProduct(id, vendorId, updates);
       if (!updated) return problem(res, 404, "Product not found", req);
-      return ok(res, updated);
+      return ok(res, mapProductForApi(updated));
     } catch (err: any) {
       return problem(res, 500, err?.message || "Failed to update product", req);
     }
@@ -391,39 +739,39 @@ export function registerRoutes(app: Express) {
 
   // customers (paged)
   app.get("/customers", withAuth(async (req: any, res) => {
-    const s: any = storage as any;
-    const vendorId = req.auth?.vendorId ?? null;
-    const id = (req.query.id as string) ?? "";
-    if (id) {
-      if (typeof s.getCustomer === "function") {
-        const one = await storage.getCustomerWithProfile(id, vendorId);
-        if (!one) return problem(res, 404, "Customer not found", req);
-        return ok(res, one); // object payload
+    try {
+      const s: any = storage as any;
+      const vendorId = req.auth?.vendorId ?? null;
+      const id = (req.query.id as string) ?? "";
+      if (id) {
+        if (typeof s.getCustomer === "function") {
+          const one = await storage.getCustomerWithProfile(id, vendorId);
+          if (!one) return problem(res, 404, "Customer not found", req);
+          return ok(res, mapCustomerForApi(one));
+        }
+        return problem(res, 404, "Customer not found", req);
       }
-      return problem(res, 404, "Customer not found", req);
+
+      const qRaw = (req.query.q as string) ?? "";
+      const q = qRaw.trim();
+      const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
+      const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50", 10)));
+
+      if (q) {
+        const itemsOrArray =
+          typeof s.searchCustomers === "function"
+            ? await s.searchCustomers(vendorId, q, { limit, page })
+            : await s.getCustomers(vendorId, { limit, page });
+
+        const rows = (itemsOrArray?.items ?? itemsOrArray) || [];
+        return ok(res, Array.isArray(rows) ? rows.map(mapCustomerForApi) : []);
+      }
+
+      const items = await s.getCustomers(vendorId, { page, pageSize: limit });
+      return ok(res, Array.isArray(items) ? items.map(mapCustomerForApi) : []);
+    } catch (err: any) {
+      return problem(res, 500, err?.message || "Failed to load customers", req);
     }
-    const qRaw  = (req.query.q as string) ?? "";
-    const q     = qRaw.trim();
-    const page  = Math.max(1, parseInt((req.query.page  as string) || "1", 10));
-    const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50", 10)));
-  
-    // DEBUG (keep if you need to verify branch)
-    // console.log("[/customers] q:", q, "vendorId:", vendorId);
-  
-    if (q) {
-      // Use the adapter's implemented search
-      const itemsOrArray =
-        typeof s.searchCustomers === "function"
-          ? await s.searchCustomers(vendorId, q, { limit, page })
-          : await s.getCustomers(vendorId, { limit, page }); // fallback (non-search)
-    
-      // Frontend accepts array or {data:[...]} — keep it simple here
-      return ok(res, (itemsOrArray?.items ?? itemsOrArray) || []);
-    }
-  
-    // Fall back to the list (still supports pagination)
-    const items = await s.getCustomers(vendorId, { page, pageSize: limit });
-    return ok(res, items);
   }));
 
   // customer by id
@@ -433,7 +781,7 @@ export function registerRoutes(app: Express) {
     if (typeof s.getCustomer === "function") {
       const customer = await storage.getCustomerWithProfile(req.params.id, vendorId);
       if (!customer) return problem(res, 404, "Customer not found", req);
-      return ok(res, customer);
+      return ok(res, mapCustomerForApi(customer));
     }
     return problem(res, 404, "Customer not found", req);
   }));
@@ -442,31 +790,39 @@ export function registerRoutes(app: Express) {
   app.get("/taxonomy/diets", withAuth(async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
-    const rows = await db.select().from(schema.taxTags).where(eq(schema.taxTags.active, true)).orderBy(schema.taxTags.label);
-    return ok(res, { data: all ? rows : rows.slice(0, top) });
+    const q = await db.execute(sql`
+      select code, name as label
+      from gold.dietary_preferences
+      order by name asc
+      limit ${all ? 5000 : top}
+    `);
+    return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
   }));
 
   // GET /taxonomy/allergens?top=10[&all=1]
   app.get("/taxonomy/allergens", withAuth(async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
-    const rows = await db.select().from(schema.taxAllergens).where(eq(schema.taxAllergens.active, true)).orderBy(schema.taxAllergens.label);
-    return ok(res, { data: all ? rows : rows.slice(0, top) });
+    const q = await db.execute(sql`
+      select code, name as label
+      from gold.allergens
+      order by name asc
+      limit ${all ? 5000 : top}
+    `);
+    return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
   }));
 
-  // GET /taxonomy/conditions?top=10[&all=1] (vendor-scoped)
+  // GET /taxonomy/conditions?top=10[&all=1]
   app.get("/taxonomy/conditions", withAuth(async (req: any, res) => {
-    const vendorId = req.auth?.vendorId;
-    if (!vendorId) return ok(res, { data: [] });
     const top = Number.isFinite(+req.query.top) ? Math.max(1, +req.query.top) : 10;
     const all = String(req.query.all ?? "0") === "1";
-    const rows = await db
-      .select({ conditionCode: schema.dietRules.conditionCode })
-      .from(schema.dietRules)
-      .where(and(eq(schema.dietRules.vendorId, vendorId), eq(schema.dietRules.active, true)))
-      .groupBy(schema.dietRules.conditionCode)
-      .orderBy(schema.dietRules.conditionCode);
-    return ok(res, { data: all ? rows : rows.slice(0, top) });
+    const q = await db.execute(sql`
+      select code as condition_code, name as label
+      from gold.health_conditions
+      order by name asc
+      limit ${all ? 5000 : top}
+    `);
+    return ok(res, { data: (q.rows ?? []).map((r: any) => ({ conditionCode: r.condition_code, label: r.label })) });
   }));
 
   // UPDATE customer (profile fields)
@@ -501,6 +857,9 @@ export function registerRoutes(app: Express) {
     if (tags !== undefined) updates.customTags = tags;
 
     if (b.notes !== undefined) updates.notes = String(b.notes);
+    if (b.status !== undefined || b.account_status !== undefined) {
+      updates.accountStatus = toGoldCustomerStatus(b.status ?? b.account_status);
+    }
 
     // Location (jsonb)
     if (b.location && typeof b.location === "object") {
@@ -513,7 +872,7 @@ export function registerRoutes(app: Express) {
       } as any;
     }
 
-    if (req.user?.id) updates.updatedBy = req.user.id;
+    if (req.auth?.userId) updates.updatedBy = req.auth.userId;
 
     // 🔎 Debug
     console.log('[PATCH /customers/:id] body=', b);
@@ -524,7 +883,7 @@ export function registerRoutes(app: Express) {
 
     try {
       const withHealth = await storage.getCustomerWithProfile(id, vendorId);
-      return ok(res, withHealth ?? base);
+      return ok(res, mapCustomerForApi(withHealth ?? base));
     } catch (e: any) {
       console.error("[PATCH /customers/:id]", e);
       return problem(res, 400, e?.message || "Update failed", req);
@@ -575,7 +934,9 @@ export function registerRoutes(app: Express) {
       weightKg:       toNum(b.weightKg ?? b.weight_kg),
       age:            b.age !== undefined ? toNum(b.age) : undefined,
       gender:         b.gender ?? undefined,
-      activityLevel:  b.activityLevel ?? b.activity_level ?? undefined,
+      activityLevel:  (b.activityLevel ?? b.activity_level) !== undefined
+        ? toGoldActivityLevel(b.activityLevel ?? b.activity_level)
+        : undefined,
       conditions:     Array.isArray(b.conditions) ? b.conditions : undefined,
       dietGoals:      Array.isArray(b.dietGoals)  ? b.dietGoals  : undefined,
       macroTargets:   b.macroTargets ?? b.macro_targets ?? undefined, // jsonb
@@ -594,7 +955,10 @@ export function registerRoutes(app: Express) {
 
     try {
       const row = await storage.upsertCustomerHealth(customerId, vendorId, clean);
-      return res.status(200).json(row); // return the updated row in camelCase
+      return res.status(200).json({
+        ...row,
+        activityLevel: toUiActivityLevel((row as any).activityLevel ?? (row as any).activity_level),
+      });
     } catch (e: any) {
       return problem(res, 400, e?.message ?? "Health update failed", req);
     }
@@ -618,7 +982,7 @@ export function registerRoutes(app: Express) {
       // optional sync of age/gender to customers table if given in health
       age: b.health?.age ?? null,
       gender: b.health?.gender ?? null,
-      // status is UI-only in your codebase; ignore or map if you add a column later
+      status: b.status ?? "active",
     };
 
     // Normalize health (optional block)
@@ -632,7 +996,7 @@ export function registerRoutes(app: Express) {
       ? {
           age: toNum(h.age),
           gender: h.gender ?? undefined,
-          activityLevel: h.activityLevel ?? undefined,
+          activityLevel: toGoldActivityLevel(h.activityLevel ?? undefined),
           heightCm: h.heightCm !== undefined ? toStr(h.heightCm) : undefined, // numeric -> string
           weightKg: h.weightKg !== undefined ? toStr(h.weightKg) : undefined, // numeric -> string
           conditions: Array.isArray(h.conditions) ? h.conditions : [],
@@ -653,7 +1017,15 @@ export function registerRoutes(app: Express) {
         customer: customerInput,
         health: healthInput,
       });
-      return res.status(201).json(created);
+      return res.status(201).json({
+        customer: mapCustomerForApi(created.customer),
+        health: created.health
+          ? {
+              ...created.health,
+              activityLevel: toUiActivityLevel((created.health as any).activityLevel),
+            }
+          : null,
+      });
     } catch (e: any) {
       return problem(res, 400, e?.message ?? "Create customer failed", req);
     }
@@ -662,6 +1034,13 @@ export function registerRoutes(app: Express) {
 
   // customer matches (uses services/matching if available)
   app.get("/matching/:customerId", withAuth(async (req: any, res) => {
+    if (!MATCHING_ENABLED) {
+      return res.status(503).json({
+        ok: false,
+        code: "MATCHING_DISABLED",
+        message: "Matching is temporarily disconnected. Neo4j integration is pending.",
+      });
+    }
     const customerId = String(req.params.customerId);
     const limitRaw = Number(req.query.limit ?? req.query.top ?? 24);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 24;
@@ -794,6 +1173,13 @@ export function registerRoutes(app: Express) {
   // PREVIEW matches with ad-hoc overrides (no persistence)
   // POST /matching/:customerId/preview
   app.post("/matching/:customerId/preview", withAuth(async (req: any, res) => {
+    if (!MATCHING_ENABLED) {
+      return res.status(503).json({
+        ok: false,
+        code: "MATCHING_DISABLED",
+        message: "Matching preview is temporarily disconnected. Neo4j integration is pending.",
+      });
+    }
     try{
       const customerId = String(req.params.customerId);
       const limitRaw = Number(req.query.limit ?? req.body?.limit ?? 24);
@@ -936,6 +1322,13 @@ export function registerRoutes(app: Express) {
 
   // Create a job and tell the client where to upload the CSV
   app.post("/jobs", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      return res.status(503).json({
+        ok: false,
+        code: "JOBS_DISABLED",
+        message: "Jobs and ingestion are temporarily disconnected in this phase.",
+      });
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
     const mode = ((req.query.mode as string) || "products") as "products" | "customers" | "api_sync";
@@ -969,6 +1362,13 @@ export function registerRoutes(app: Express) {
   app.post("/jobs/:id/upload",
     uploadMw.single("file"),        // <— field name MUST be "file"
     withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+        return res.status(503).json({
+          ok: false,
+          code: "JOBS_DISABLED",
+          message: "Jobs and ingestion are temporarily disconnected in this phase.",
+        });
+      }
       const vendorId = req.auth?.vendorId as string | undefined;
       const jobId = String(req.params.id);
       const mode = String(req.query.mode || "products") as "products" | "customers" | "api_sync";
@@ -1046,6 +1446,13 @@ export function registerRoutes(app: Express) {
 
   // Start processing (mark running and enqueue)
   app.post("/jobs/:id/start", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      return res.status(503).json({
+        ok: false,
+        code: "JOBS_DISABLED",
+        message: "Jobs and ingestion are temporarily disconnected in this phase.",
+      });
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     const jobId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
@@ -1074,6 +1481,9 @@ export function registerRoutes(app: Express) {
 
   // Single job (polled by the wizard)
   app.get("/jobs/:id", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      return ok(res, { id: String(req.params.id), status: "queued", progressPct: 0, disabled: true });
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     const jobId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
@@ -1092,6 +1502,9 @@ export function registerRoutes(app: Express) {
 
   // Job errors (JSON)
   app.get("/jobs/:id/errors", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      return ok(res, { data: [] });
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     const jobId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
@@ -1120,6 +1533,10 @@ export function registerRoutes(app: Express) {
 
   // Job errors CSV download
   app.get("/jobs/:id/errors.csv", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      return res.status(200).send("row_no,field,code,message,raw\n");
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     const jobId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
@@ -1157,6 +1574,10 @@ export function registerRoutes(app: Express) {
 
   // Export items CSV (best-effort)
   app.get("/jobs/:id/items.csv", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      return res.status(200).send("note\n\"Jobs are temporarily disconnected\"\n");
+    }
     const vendorId = req.auth?.vendorId as string | undefined;
     const jobId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
@@ -1220,6 +1641,9 @@ export function registerRoutes(app: Express) {
 
   // Jobs list (used by the Jobs page and Search)
   app.get("/jobs", withAuth(async (req: any, res) => {
+    if (!JOBS_ENABLED) {
+      return ok(res, { data: [], page: 1, pageSize: 0, total: 0, disabled: true });
+    }
     const vendorId = req.auth?.vendorId as string;
     const qRaw = (req.query.q as string) ?? "";
     const q = qRaw.trim().toLowerCase();
@@ -1286,3 +1710,4 @@ export function registerRoutes(app: Express) {
     return ok(res, { status: "unknown" });
   }));
 }
+
