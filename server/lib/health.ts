@@ -12,7 +12,7 @@ export function calculateBMR(
   weightKg: number,
   heightCm: number,
   age: number,
-  gender: 'male' | 'female' | 'other' | 'unspecified'
+  gender: 'male' | 'female' | 'other' | 'unspecified' | 'prefer_not_to_say'
 ): number {
   if (gender === 'male') {
     return 10 * weightKg + 6.25 * heightCm - 5 * age + 5;
@@ -26,6 +26,10 @@ export function calculateBMR(
 export function calculateTDEE(bmr: number, activityLevel: string): number {
   const factors = {
     sedentary: 1.2,
+    lightly_active: 1.375,
+    moderately_active: 1.55,
+    very_active: 1.725,
+    extra_active: 1.9,
     light: 1.375,
     moderate: 1.55,
     very: 1.725,
@@ -48,7 +52,7 @@ export function deriveDailyLimits(
   conditionRules: any[] = []
 ): Record<string, any> {
   const baseLimits = {
-    calories: profile.tdeeCached || 2000,
+    calories: Number(profile.tdeeCached || 2000),
     sodium: 2300, // mg
     sugar: 50, // g
     saturatedFat: 20, // g
@@ -83,13 +87,13 @@ export function calculateHealthMetrics(
     Number(profile.weightKg),
     Number(profile.heightCm),
     Number(profile.age),
-    profile.gender || 'unspecified'
+    ((profile.gender as any) || 'prefer_not_to_say')
   );
 
   const tdee = calculateTDEE(bmr, profile.activityLevel || 'sedentary');
 
   const derivedLimits = deriveDailyLimits(
-    { ...profile, tdeeCached: tdee },
+    { ...profile, tdeeCached: String(tdee) as any },
     conditionRules
   );
 
@@ -120,7 +124,7 @@ export function scoreProductForHealth(
 
   // Apply soft budget scoring based on derived limits
   const nutrition = product.nutrition || {};
-  const limits = customerProfile.derivedLimits || {};
+  const limits = (customerProfile.derivedLimits as Record<string, number>) || {};
 
   // Penalize products that consume large fractions of daily budgets
   if (limits.sodium && nutrition.sodium) {

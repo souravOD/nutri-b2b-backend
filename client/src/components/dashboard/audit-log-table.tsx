@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Download, Shield, User, Bot } from "lucide-react";
 
 export function AuditLogTable() {
-  const { data: auditLogs, isLoading } = useQuery({
+  const { data: auditLogs, isLoading } = useQuery<any>({
     queryKey: ['/audit'],
     refetchInterval: 60000, // Refresh every minute
   });

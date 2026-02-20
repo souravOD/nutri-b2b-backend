@@ -1,0 +1,184 @@
+{
+  "collection": {
+    "$id": "689a141c0035974c0af4",
+    "name": "ingestion_jobs",
+    "enabled": true,
+    "documentSecurity": false,
+    "permissions": []
+  },
+  "attributes": [
+    {
+      "key": "vendorTeamId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:51.039+00:00",
+      "$updatedAt": "2025-08-11T16:44:51.237+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "sourceType",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:51.692+00:00",
+      "$updatedAt": "2025-08-11T16:44:51.874+00:00",
+      "elements": [
+        "csv_products",
+        "csv_customers",
+        "api_push",
+        "api_pull"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "status",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:52.359+00:00",
+      "$updatedAt": "2025-08-11T16:44:52.697+00:00",
+      "elements": [
+        "queued",
+        "processing",
+        "done",
+        "failed"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "total",
+      "type": "integer",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:53.629+00:00",
+      "$updatedAt": "2025-08-11T16:44:53.844+00:00",
+      "min": 0,
+      "max": 9223372036854776000,
+      "default": null
+    },
+    {
+      "key": "success",
+      "type": "integer",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:54.304+00:00",
+      "$updatedAt": "2025-08-11T16:44:54.501+00:00",
+      "min": 0,
+      "max": 9223372036854776000,
+      "default": null
+    },
+    {
+      "key": "failed",
+      "type": "integer",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:55.106+00:00",
+      "$updatedAt": "2025-08-11T16:44:55.291+00:00",
+      "min": 0,
+      "max": 9223372036854776000,
+      "default": null
+    },
+    {
+      "key": "startedAt",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:56.169+00:00",
+      "$updatedAt": "2025-08-11T16:44:56.345+00:00",
+      "format": "",
+      "default": null
+    },
+    {
+      "key": "finishedAt",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T16:44:56.812+00:00",
+      "$updatedAt": "2025-08-11T16:44:56.988+00:00",
+      "format": "",
+      "default": null
+    },
+    {
+      "key": "fileId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T17:03:03.094+00:00",
+      "$updatedAt": "2025-08-11T17:03:03.810+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "errorFileId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T17:03:03.834+00:00",
+      "$updatedAt": "2025-08-11T17:03:04.212+00:00",
+      "size": 128,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "notes",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T17:03:04.492+00:00",
+      "$updatedAt": "2025-08-11T17:03:04.882+00:00",
+      "size": 1024,
+      "default": null,
+      "encrypt": false
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_2_key_vendor_status_time",
+      "$createdAt": "2025-08-11T16:45:09.527+00:00",
+      "$updatedAt": "2025-08-11T16:45:09.740+00:00",
+      "key": "key_vendor_status_time",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "status",
+        "startedAt"
+      ],
+      "lengths": [
+        0,
+        0,
+        0
+      ],
+      "orders": []
+    }
+  ]
+}

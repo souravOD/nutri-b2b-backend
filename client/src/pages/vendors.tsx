@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import { Plus, Building, Users, Package } from "lucide-react";
 
 export default function Vendors() {
-  const { data: vendors, isLoading } = useQuery({
+  const { data: vendors, isLoading } = useQuery<any>({
     queryKey: ['/vendors'],
   });
 

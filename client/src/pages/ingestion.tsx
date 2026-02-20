@@ -8,7 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Upload, Play, Pause, AlertCircle, CheckCircle, Clock, Download } from "lucide-react";
 
 export default function Ingestion() {
-  const { data: jobs, isLoading } = useQuery({
+  const { data: jobs, isLoading } = useQuery<any>({
     queryKey: ['/jobs'],
     refetchInterval: 5000, // Poll every 5 seconds for real-time updates
   });

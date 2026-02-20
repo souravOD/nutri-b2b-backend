@@ -58,8 +58,12 @@ export class QueueProcessor {
 // Global queue processor instance
 export const queueProcessor = new QueueProcessor();
 
-// Auto-start in production
-if (process.env.NODE_ENV === 'production') {
+// Auto-start in production only when explicitly enabled.
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.B2B_ENABLE_JOBS === '1' &&
+  process.env.START_QUEUE === '1'
+) {
   queueProcessor.start().catch(console.error);
 }
 

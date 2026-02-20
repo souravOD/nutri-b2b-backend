@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TrendingUp, Search, Zap, Database, Clock, Users } from "lucide-react";
 
 export default function Analytics() {
-  const { data: metrics, isLoading } = useQuery({
+  const { data: metrics, isLoading } = useQuery<any>({
     queryKey: ['/metrics'],
     refetchInterval: 30000, // Refresh every 30 seconds
   });

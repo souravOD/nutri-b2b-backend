@@ -4,18 +4,17 @@ import {
   Account,
   Databases,
   Query,
+  Teams,
 } from "node-appwrite";
-import { createClient as createSupabaseClient, PostgrestError } from "@supabase/supabase-js";
+import { db } from "../lib/database.js";
+import { sql } from "drizzle-orm";
 
 const router = Router();
 
-// prove this handler served the request
 router.use((_req, res, next) => {
-  res.setHeader("X-Onboard-Impl", "v4-users-user_links");
+  res.setHeader("X-Onboard-Impl", "v6-gold-b2b-strict-resolve");
   next();
 });
-
-/* -------------------- helpers & setup -------------------- */
 
 const isProd = process.env.NODE_ENV === "production";
 const env = (k: string) => {
@@ -24,18 +23,92 @@ const env = (k: string) => {
   return v;
 };
 
-const slugFromEmail = (email: string) => {
-  const domain = (email.split("@")[1] || "").toLowerCase();
-  const root = domain.split(".")[0] || domain;
-  return root.replace(/[^a-z0-9]+/gi, "-");
+type ProfileDoc = {
+  user_id?: string;
+  appwrite_user_id?: string;
+  vendor_id?: string;
+  vendor_slug?: string;
+  vendorSlug?: string;
+  full_name?: string;
+  role?: string;
+  team_id?: string;
+  teamId?: string;
 };
 
-const titleFromSlug = (slug: string) =>
-  slug
-    .split(/[-_]+/)
-    .filter(Boolean)
-    .map((w) => w[0]?.toUpperCase() + w.slice(1))
-    .join(" ");
+type VendorRow = {
+  id: string;
+  slug: string | null;
+  name: string | null;
+  team_id: string | null;
+  domains: string[] | null;
+  status: string;
+};
+
+type DbUserRow = {
+  id: string;
+  email: string;
+  display_name: string;
+  appwrite_user_id: string | null;
+  vendor_id: string | null;
+};
+
+type DbUserLinkRow = {
+  user_id: string;
+  vendor_id: string;
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
+  status: "active" | "inactive" | "suspended";
+};
+
+type TeamMembershipHit = {
+  teamId: string;
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
+};
+
+const normalizeText = (value?: string | null): string | null => {
+  const v = String(value || "").trim();
+  return v.length ? v : null;
+};
+
+const normalizeLower = (value?: string | null): string | null => {
+  const v = normalizeText(value);
+  return v ? v.toLowerCase() : null;
+};
+
+const emailDomain = (email?: string | null): string | null => {
+  const at = String(email || "").indexOf("@");
+  if (at < 0) return null;
+  const d = String(email).slice(at + 1).trim().toLowerCase();
+  return d || null;
+};
+
+function normalizeRole(input?: string | null): DbUserLinkRow["role"] {
+  const role = String(input || "viewer").toLowerCase();
+  if (role === "superadmin") return "superadmin";
+  if (role === "admin" || role === "vendor_admin") return "vendor_admin";
+  if (role === "operator" || role === "vendor_operator") return "vendor_operator";
+  return "vendor_viewer";
+}
+
+function extractJwt(req: Request): string | null {
+  const auth = req.headers.authorization;
+  if (auth && /^bearer\s+/i.test(auth)) return auth.replace(/^bearer\s+/i, "").trim();
+  const x = req.headers["x-appwrite-jwt"];
+  if (typeof x === "string" && x.trim().length > 0) return x.trim();
+  return null;
+}
+
+function jsonError(
+  res: Response,
+  status: number,
+  code: "invalid_token" | "vendor_not_provisioned" | "vendor_team_mismatch" | "identity_conflict" | "onboarding_failed",
+  message: string,
+  debug?: any
+) {
+  if (!isProd && debug) {
+    return res.status(status).json({ ok: false, code, message, debug });
+  }
+  return res.status(status).json({ ok: false, code, message });
+}
 
 const buildUserClient = (jwt: string) =>
   new AppwriteClient()
@@ -49,152 +122,281 @@ const buildAdminClient = () =>
     .setProject(env("APPWRITE_PROJECT_ID"))
     .setKey(env("APPWRITE_API_KEY"));
 
-type VendorRow = { id: string; slug: string; name?: string };
-type DbUserRow = { id: string; email: string | null; display_name: string | null; appwrite_user_id: string | null };
+async function loadProfileByUserId(adb: Databases, userId: string): Promise<ProfileDoc | null> {
+  const dbId = env("APPWRITE_DB_ID");
+  const colId = env("APPWRITE_USERPROFILES_COL");
 
-const sb = createSupabaseClient(
-  env("SUPABASE_URL"),
-  env("SUPABASE_SERVICE_ROLE_KEY")
-);
+  try {
+    return (await adb.getDocument(dbId, colId, userId)) as unknown as ProfileDoc;
+  } catch {
+    // fall through to lookup queries
+  }
 
-function supabaseErrInfo(e?: any) {
-  const pe = e as PostgrestError;
-  if (pe && (pe.message || pe.details || pe.hint || pe.code)) {
+  const byUserId = await adb.listDocuments(dbId, colId, [
+    Query.equal("user_id", userId),
+    Query.limit(1),
+  ]);
+  if (byUserId.total > 0) return byUserId.documents[0] as unknown as ProfileDoc;
+
+  const byAppwriteId = await adb.listDocuments(dbId, colId, [
+    Query.equal("appwrite_user_id", userId),
+    Query.limit(1),
+  ]);
+  if (byAppwriteId.total > 0) return byAppwriteId.documents[0] as unknown as ProfileDoc;
+
+  return null;
+}
+
+async function loadActiveVendors(): Promise<VendorRow[]> {
+  const out = await db.execute(sql`
+    SELECT id, slug, name, team_id, domains, status
+    FROM gold.vendors
+    WHERE status = 'active'
+    ORDER BY slug NULLS LAST, name NULLS LAST
+  `);
+  return (out.rows || []) as unknown as VendorRow[];
+}
+
+async function findMembershipVendor(
+  teams: Teams,
+  vendors: VendorRow[],
+  appwriteUserId: string,
+  preferredTeamId?: string | null
+): Promise<TeamMembershipHit | null> {
+  const teamIds = Array.from(
+    new Set(
+      vendors
+        .map((v) => normalizeText(v.team_id))
+        .filter((v): v is string => !!v)
+    )
+  );
+
+  if (!teamIds.length) return null;
+
+  if (preferredTeamId && teamIds.includes(preferredTeamId)) {
+    const idx = teamIds.indexOf(preferredTeamId);
+    teamIds.splice(idx, 1);
+    teamIds.unshift(preferredTeamId);
+  }
+
+  for (const teamId of teamIds) {
+    try {
+      const page = await teams.listMemberships(teamId, [
+        Query.equal("userId", appwriteUserId),
+        Query.limit(1),
+      ]);
+      const m: any = page.memberships?.[0];
+      if (m) {
+        const role = normalizeRole(Array.isArray(m.roles) ? m.roles[0] : "viewer");
+        return { teamId, role };
+      }
+    } catch {
+      // Ignore one-off team read failures and continue with remaining teams.
+    }
+  }
+
+  return null;
+}
+
+function resolveVendor(vendors: VendorRow[], opts: {
+  membershipTeamId?: string | null;
+  profileVendorSlug?: string | null;
+  domain?: string | null;
+}) {
+  const profileSlug = normalizeLower(opts.profileVendorSlug);
+  const domain = normalizeLower(opts.domain);
+  const membershipTeamId = normalizeText(opts.membershipTeamId);
+
+  const teamVendor = membershipTeamId
+    ? vendors.find((v) => normalizeText(v.team_id) === membershipTeamId) || null
+    : null;
+
+  const slugVendor = profileSlug
+    ? vendors.find((v) => normalizeLower(v.slug) === profileSlug) || null
+    : null;
+
+  const domainMatches = domain
+    ? vendors.filter((v) => (v.domains || []).map((d) => d.toLowerCase()).includes(domain))
+    : [];
+  const domainVendor = domainMatches.length === 1 ? domainMatches[0] : null;
+
+  if (domainMatches.length > 1 && !teamVendor && !slugVendor) {
     return {
-      type: "supabase",
-      code: pe.code,
-      message: pe.message,
-      details: pe.details,
-      hint: pe.hint,
+      vendor: null,
+      source: null,
+      mismatch: `Multiple active vendors match domain '${domain}'.`,
     };
   }
-  return { message: (e && (e.message || String(e))) || "Unknown error" };
+
+  if (teamVendor && slugVendor && teamVendor.id !== slugVendor.id) {
+    return {
+      vendor: null,
+      source: null,
+      mismatch: `Team vendor '${teamVendor.slug || teamVendor.id}' does not match profile vendor '${slugVendor.slug || slugVendor.id}'.`,
+    };
+  }
+
+  if (teamVendor && domainVendor && teamVendor.id !== domainVendor.id) {
+    return {
+      vendor: null,
+      source: null,
+      mismatch: `Team vendor '${teamVendor.slug || teamVendor.id}' does not match domain vendor '${domainVendor.slug || domainVendor.id}'.`,
+    };
+  }
+
+  if (!teamVendor && slugVendor && domainVendor && slugVendor.id !== domainVendor.id) {
+    return {
+      vendor: null,
+      source: null,
+      mismatch: `Profile vendor '${slugVendor.slug || slugVendor.id}' does not match domain vendor '${domainVendor.slug || domainVendor.id}'.`,
+    };
+  }
+
+  if (teamVendor) return { vendor: teamVendor, source: "team_id", mismatch: null };
+  if (slugVendor) return { vendor: slugVendor, source: "slug", mismatch: null };
+  if (domainVendor) return { vendor: domainVendor, source: "domain", mismatch: null };
+
+  return { vendor: null, source: null, mismatch: null };
 }
 
-function devError(res: Response, http = 500, msg = "Onboarding failed", extra?: any) {
-  if (!isProd) return res.status(http).json({ ok: false, message: msg, debug: extra });
-  return res.status(http).json({ ok: false, message: msg });
-}
+async function getOrCreateUser(params: {
+  appwriteUserId: string;
+  email: string;
+  displayName?: string | null;
+  vendorId: string;
+}): Promise<DbUserRow> {
+  const email = params.email.trim().toLowerCase();
+  const displayName = normalizeText(params.displayName) || email.split("@")[0] || "user";
 
-/** users: find by appwrite_user_id, then email; create if missing. */
-async function getOrCreateUser(appwriteId: string, email: string, name: string | undefined, vendorId: string): Promise<DbUserRow> {
-  // by appwrite_user_id
-  const q1 = await sb
-    .from("users")
-    .select("id, email, display_name, appwrite_user_id")
-    .eq("appwrite_user_id", appwriteId)
-    .maybeSingle();
+  const byAppwrite = await db.execute(sql`
+    SELECT id, email, display_name, appwrite_user_id, vendor_id
+    FROM gold.b2b_users
+    WHERE appwrite_user_id = ${params.appwriteUserId}
+    LIMIT 1
+  `);
+  const hitByAppwrite = byAppwrite.rows?.[0] as DbUserRow | undefined;
 
-  if (q1.error) {
-    throw Object.assign(new Error("Failed selecting users by appwrite_user_id"), { cause: supabaseErrInfo(q1.error) });
+  if (hitByAppwrite) {
+    const upd = await db.execute(sql`
+      UPDATE gold.b2b_users
+      SET
+        email = ${email},
+        display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
+        vendor_id = ${params.vendorId}::uuid,
+        source = 'appwrite',
+        status = 'active',
+        updated_at = now()
+      WHERE id = ${hitByAppwrite.id}::uuid
+      RETURNING id, email, display_name, appwrite_user_id, vendor_id
+    `);
+    return upd.rows?.[0] as DbUserRow;
   }
-  if (q1.data) return q1.data as DbUserRow;
 
-  // by email
-  const q2 = await sb
-    .from("users")
-    .select("id, email, display_name, appwrite_user_id")
-    .eq("email", email)
-    .maybeSingle();
+  const byEmail = await db.execute(sql`
+    SELECT id, email, display_name, appwrite_user_id, vendor_id
+    FROM gold.b2b_users
+    WHERE lower(email) = lower(${email})
+    LIMIT 1
+  `);
+  const hitByEmail = byEmail.rows?.[0] as DbUserRow | undefined;
 
-  if (q2.error) {
-    throw Object.assign(new Error("Failed selecting users by email"), { cause: supabaseErrInfo(q2.error) });
-  }
-  if (q2.data) {
-    // backfill appwrite_user_id / display_name if missing
-    const patch: Partial<DbUserRow> = {};
-    if (!q2.data.appwrite_user_id) patch.appwrite_user_id = appwriteId;
-    if (!q2.data.display_name) patch.display_name = name || email;
-    if (!(q2.data as any).vendor_id) (patch as any).vendor_id = vendorId;
-    if (Object.keys(patch).length) {
-      const upd = await sb.from("users").update(patch).eq("id", q2.data.id).select("id, email, display_name, appwrite_user_id, vendor_id").single();
-      if (upd.error) {
-        throw Object.assign(new Error("Failed updating users"), { cause: supabaseErrInfo(upd.error) });
-      }
-      return upd.data as DbUserRow;
+  if (hitByEmail) {
+    if (hitByEmail.appwrite_user_id && hitByEmail.appwrite_user_id !== params.appwriteUserId) {
+      throw Object.assign(new Error("Email is already linked to a different Appwrite user."), {
+        code: "identity_conflict",
+      });
     }
-    return q2.data as DbUserRow;
+
+    const upd = await db.execute(sql`
+      UPDATE gold.b2b_users
+      SET
+        appwrite_user_id = ${params.appwriteUserId},
+        display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
+        vendor_id = ${params.vendorId}::uuid,
+        source = 'appwrite',
+        status = 'active',
+        updated_at = now()
+      WHERE id = ${hitByEmail.id}::uuid
+      RETURNING id, email, display_name, appwrite_user_id, vendor_id
+    `);
+    return upd.rows?.[0] as DbUserRow;
   }
 
-  // create
-  const ins = await sb
-    .from("users")
-    .insert([{ 
-      email, 
-      display_name: name || email, 
-      appwrite_user_id: appwriteId,
-      vendor_id: vendorId,               // ✅ satisfy NOT NULL
-    }])
-    .select("id, email, display_name, appwrite_user_id, vendor_id")
-    .single();
+  const ins = await db.execute(sql`
+    INSERT INTO gold.b2b_users (
+      email,
+      display_name,
+      appwrite_user_id,
+      source,
+      vendor_id,
+      status
+    )
+    VALUES (
+      ${email},
+      ${displayName},
+      ${params.appwriteUserId},
+      'appwrite',
+      ${params.vendorId}::uuid,
+      'active'
+    )
+    RETURNING id, email, display_name, appwrite_user_id, vendor_id
+  `);
 
-  if (ins.error) {
-    throw Object.assign(new Error("Failed inserting users"), { cause: supabaseErrInfo(ins.error) });
-  }
-  return ins.data as DbUserRow;
+  return ins.rows?.[0] as DbUserRow;
 }
 
-/** vendors: find by slug; create with valid name if missing. */
-async function getOrCreateVendor(slug: string): Promise<VendorRow> {
-  const q1 = await sb
-    .from("vendors")
-    .select("id, slug, name")
-    .eq("slug", slug)
-    .maybeSingle();
+async function ensureUserLink(params: {
+  userId: string;
+  vendorId: string;
+  role: DbUserLinkRow["role"];
+}): Promise<DbUserLinkRow> {
+  const existing = await db.execute(sql`
+    SELECT user_id, vendor_id, role, status
+    FROM gold.b2b_user_links
+    WHERE user_id = ${params.userId}::uuid
+    LIMIT 1
+  `);
 
-  if (q1.error) {
-    throw Object.assign(new Error("Failed selecting vendor"), { cause: supabaseErrInfo(q1.error) });
+  const hit = existing.rows?.[0] as DbUserLinkRow | undefined;
+
+  if (!hit) {
+    const ins = await db.execute(sql`
+      INSERT INTO gold.b2b_user_links (user_id, vendor_id, role, status)
+      VALUES (
+        ${params.userId}::uuid,
+        ${params.vendorId}::uuid,
+        ${params.role},
+        'active'
+      )
+      RETURNING user_id, vendor_id, role, status
+    `);
+    return ins.rows?.[0] as DbUserLinkRow;
   }
-  if (q1.data) return q1.data as VendorRow;
 
-  const ins = await sb
-    .from("vendors")
-    .insert([{ slug, name: titleFromSlug(slug) }]) // name is NOT NULL in your schema
-    .select("id, slug, name")
-    .single();
-
-  if (ins.error) {
-    throw Object.assign(new Error("Failed inserting vendor"), { cause: supabaseErrInfo(ins.error) });
+  if (
+    hit.vendor_id !== params.vendorId ||
+    hit.role !== params.role ||
+    hit.status !== "active"
+  ) {
+    const upd = await db.execute(sql`
+      UPDATE gold.b2b_user_links
+      SET
+        vendor_id = ${params.vendorId}::uuid,
+        role = ${params.role},
+        status = 'active',
+        updated_at = now()
+      WHERE user_id = ${params.userId}::uuid
+      RETURNING user_id, vendor_id, role, status
+    `);
+    return upd.rows?.[0] as DbUserLinkRow;
   }
-  return ins.data as VendorRow;
+
+  return hit;
 }
 
-/** user_links: ensure link by user_id (uuid), not appwrite_user_id. */
-async function ensureUserLink(userId: string, vendorId: string) {
-  const sel = await sb
-    .from("user_links")
-    .select("user_id, vendor_id, role")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (sel.error) {
-    throw Object.assign(new Error("Failed selecting user_link"), { cause: supabaseErrInfo(sel.error) });
-  }
-
-  if (!sel.data) {
-    // role column is NOT NULL (enum). Use a valid value per your project (e.g., vendor_viewer).
-    const ins = await sb.from("user_links").insert([
-      { user_id: userId, vendor_id: vendorId, role: "vendor_viewer" },
-    ]);
-    if (ins.error) {
-      throw Object.assign(new Error("Failed inserting user_link"), { cause: supabaseErrInfo(ins.error) });
-    }
-  } else if (sel.data.vendor_id !== vendorId) {
-    const upd = await sb.from("user_links").update({ vendor_id: vendorId }).eq("user_id", userId);
-    if (upd.error) {
-      throw Object.assign(new Error("Failed updating user_link"), { cause: supabaseErrInfo(upd.error) });
-    }
-  }
-}
-
-/* -------------------- route -------------------- */
-
-/**
- * POST /onboard/self
- * Headers: Authorization: Bearer <APPWRITE_JWT>  (or X-Appwrite-JWT)
- */
 router.post("/self", async (req: Request, res: Response) => {
   const trace: string[] = [];
+
   try {
     const REQUIRED = [
       "APPWRITE_ENDPOINT",
@@ -202,94 +404,155 @@ router.post("/self", async (req: Request, res: Response) => {
       "APPWRITE_API_KEY",
       "APPWRITE_DB_ID",
       "APPWRITE_USERPROFILES_COL",
-      "SUPABASE_URL",
-      "SUPABASE_SERVICE_ROLE_KEY",
     ];
     for (const k of REQUIRED) {
-      if (!process.env[k]) return devError(res, 500, "Missing server configuration", { missing: k });
+      if (!process.env[k]) {
+        return jsonError(res, 500, "onboarding_failed", "Missing server configuration", { missing: k });
+      }
     }
 
-    const jwt =
-      (req.headers.authorization || "").replace(/^bearer\s+/i, "") ||
-      String(req.headers["x-appwrite-jwt"] || "");
-    if (!jwt) return devError(res, 401, "Missing JWT");
+    const jwt = extractJwt(req);
+    if (!jwt) {
+      return jsonError(res, 401, "invalid_token", "Missing Appwrite JWT.");
+    }
 
-    // 1) Appwrite: who is the caller?
     trace.push("account.get");
-    const me = await new Account(buildUserClient(jwt)).get();
-    const userInfo = {
-      appwrite_id: me.$id,
-      email: me.email,
-      name: (me as any).name,
-      emailVerified: !!(me as any).emailVerification,
-    };
-
-    // 2) (optional) Appwrite profile (admin client) — kept in case you store vendor hints there
-    trace.push("profiles.lookup");
-    const adb = new Databases(buildAdminClient());
-    const DB_ID = env("APPWRITE_DB_ID");
-    const COL_PROFILES = env("APPWRITE_USERPROFILES_COL");
-    let profileDoc: any | null = null;
+    let me: any;
     try {
-      // most setups use the Appwrite user $id as the document $id
-      profileDoc = await adb.getDocument(DB_ID, COL_PROFILES, userInfo.appwrite_id);
-    } catch {
-      // be resilient to different field names in user_profiles
-      // try both appwrite_user_id and user_id
-      const list = await adb.listDocuments(DB_ID, COL_PROFILES, [
-        Query.or([
-          Query.equal("appwrite_user_id", userInfo.appwrite_id),
-          Query.equal("user_id",           userInfo.appwrite_id),
-        ]),
-        Query.limit(1),
-      ]);
-      profileDoc = list.documents?.[0] ?? null;
+      me = await new Account(buildUserClient(jwt)).get();
+    } catch (err: any) {
+      return jsonError(res, 401, "invalid_token", "Invalid or expired Appwrite JWT.", {
+        message: err?.message || String(err),
+      });
     }
 
-    // 3) Resolve/ensure vendor FIRST (needed for users.vendor_id on insert)
-    trace.push("vendor.resolve");
-    const vendorSlug =
-      (profileDoc?.vendor_slug as string) ||
-      (profileDoc?.vendorSlug as string) ||
-      (profileDoc?.vendor_id as string)   || // some clients store the slug under vendor_id
-      slugFromEmail(userInfo.email);
+    const appwriteUserId = String(me.$id);
+    const email = String(me.email || "").trim().toLowerCase();
+    const displayName = normalizeText((me as any).name) || email.split("@")[0] || "user";
 
-    trace.push("vendor.ensure");
-    const vendorRow = await getOrCreateVendor(vendorSlug);
+    if (!email) {
+      return jsonError(res, 409, "vendor_not_provisioned", "User email is required for vendor resolution.");
+    }
 
-    // 4) Ensure users row (UUID) and attach vendor_id immediately
-    trace.push("users.ensure");
-    const dbUser = await getOrCreateUser(
-      userInfo.appwrite_id,
-      userInfo.email,
-      userInfo.name,
-      vendorRow.id
+    const adminClient = buildAdminClient();
+    const adb = new Databases(adminClient);
+    const teams = new Teams(adminClient);
+
+    trace.push("profile.lookup");
+    const profile = await loadProfileByUserId(adb, appwriteUserId);
+    const profileVendorSlug = normalizeLower(
+      profile?.vendor_slug || profile?.vendorSlug || profile?.vendor_id || null
     );
+    const profileRole = normalizeRole(profile?.role || "viewer");
+    const profileTeamId = normalizeText(profile?.team_id || profile?.teamId || null);
 
-    // 5) Ensure user_links(user_id, vendor_id, role)
-    trace.push("user_link.ensure");
-    await ensureUserLink(dbUser.id, vendorRow.id);
-    // backfill vendor_id only if null (legacy rows)
-    await sb
-      .from("users")
-      .update({ vendor_id: vendorRow.id })
-      .eq("id", dbUser.id)
-      .is("vendor_id", null);
+    trace.push("vendors.fetch_active");
+    const vendors = await loadActiveVendors();
+
+    trace.push("vendor.resolve.team_membership");
+    const membership = await findMembershipVendor(teams, vendors, appwriteUserId, profileTeamId);
+
+    trace.push("vendor.resolve.order_team_slug_domain");
+    const domain = emailDomain(email);
+    const resolved = resolveVendor(vendors, {
+      membershipTeamId: membership?.teamId || profileTeamId,
+      profileVendorSlug,
+      domain,
+    });
+
+    if (resolved.mismatch) {
+      return jsonError(
+        res,
+        409,
+        "vendor_team_mismatch",
+        "Vendor mapping mismatch detected between team/profile/domain.",
+        {
+          trace,
+          mismatch: resolved.mismatch,
+          profileVendorSlug,
+          membershipTeamId: membership?.teamId || profileTeamId,
+          domain,
+        }
+      );
+    }
+
+    if (!resolved.vendor) {
+      return jsonError(
+        res,
+        409,
+        "vendor_not_provisioned",
+        "Vendor is not provisioned for this user. Ask your admin to pre-provision the vendor and team mapping.",
+        {
+          trace,
+          profileVendorSlug,
+          membershipTeamId: membership?.teamId || profileTeamId,
+          domain,
+        }
+      );
+    }
+
+    const role = membership?.role || profileRole;
+
+    trace.push("users.upsert");
+    const user = await getOrCreateUser({
+      appwriteUserId,
+      email,
+      displayName,
+      vendorId: resolved.vendor.id,
+    });
+
+    trace.push("user_links.upsert");
+    const link = await ensureUserLink({
+      userId: user.id,
+      vendorId: resolved.vendor.id,
+      role,
+    });
 
     return res.status(200).json({
       ok: true,
       user: {
-        id: dbUser.id,
-        email: dbUser.email,
-        display_name: dbUser.display_name,
-        appwrite_user_id: dbUser.appwrite_user_id,
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        appwrite_user_id: user.appwrite_user_id,
       },
-      vendor: { id: vendorRow.id, slug: vendorRow.slug, name: vendorRow.name },
-      role: "vendor_viewer",
+      vendor: {
+        id: resolved.vendor.id,
+        slug: resolved.vendor.slug,
+        name: resolved.vendor.name,
+        team_id: resolved.vendor.team_id,
+        resolution: resolved.source,
+      },
+      link,
     });
   } catch (err: any) {
+    const code = String(err?.code || "");
+
+    if (code === "identity_conflict") {
+      return jsonError(
+        res,
+        409,
+        "identity_conflict",
+        err?.message || "Identity conflict while linking user.",
+        { trace }
+      );
+    }
+
+    if (code === "42P01") {
+      return jsonError(
+        res,
+        500,
+        "onboarding_failed",
+        "Backend database schema is missing required gold tables. Verify DATABASE_URL points to the unified Supabase project.",
+        {
+          message: err?.message || String(err),
+          trace,
+        }
+      );
+    }
+
     console.error("[/onboard/self] error:", err?.message || err, err?.cause || "");
-    return devError(res, 500, "Onboarding failed", {
+    return jsonError(res, 500, "onboarding_failed", "Onboarding failed", {
       message: err?.message || String(err),
       cause: err?.cause || null,
       trace,

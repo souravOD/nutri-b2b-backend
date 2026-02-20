@@ -117,10 +117,7 @@ async function processProductsCSV(
   const stagingData: any[] = [];
   
   return new Promise((resolve, reject) => {
-    const parser = csvParser({
-      skipEmptyLines: true,
-      skipLinesWithError: false
-    });
+    const parser = csvParser();
 
     let rowNumber = 0;
 
@@ -204,7 +201,7 @@ async function processProductsCSV(
           
           // Use UPSERT with ON CONFLICT
           await db.execute(sql`
-            INSERT INTO products (
+            INSERT INTO gold.products (
               vendor_id, external_id, name, brand, description,
               category_id, price, currency, status
             )
@@ -229,7 +226,7 @@ async function processProductsCSV(
               /* Normalize currency; default to 'USD' if blank */
               COALESCE(NULLIF(trim(both '"' from currency), ''), 'USD') AS currency,
               'active' AS status
-            FROM stg_products
+            FROM public.stg_products
             WHERE job_id = ${jobId}
               AND external_id IS NOT NULL
               AND name IS NOT NULL
@@ -252,7 +249,7 @@ async function processProductsCSV(
         }
 
         // Analyze affected partitions for performance
-        await db.execute(sql`ANALYZE products`);
+        await db.execute(sql`ANALYZE gold.products`);
 
         // Cleanup staging data
         await db.delete(stgProducts).where(eq(stgProducts.jobId, jobId));
@@ -291,10 +288,7 @@ async function processCustomersCSV(
   const stagingData: any[] = [];
   
   return new Promise((resolve, reject) => {
-    const parser = csvParser({
-      skipEmptyLines: true,
-      skipLinesWithError: false
-    });
+    const parser = csvParser();
 
     let rowNumber = 0;
 
@@ -372,7 +366,7 @@ async function processCustomersCSV(
 
         // Merge to live table
         await db.execute(sql`
-          INSERT INTO customers (
+          INSERT INTO gold.b2b_customers (
             vendor_id, external_id, full_name, email,
             dob, age, gender, location, phone
           )
@@ -394,11 +388,11 @@ async function processCustomersCSV(
             END AS age,
             /* Map 'unknown' -> 'unspecified' to match enum; blank -> NULL */
             CASE lower(NULLIF(trim(both '"' from gender), ''))
-              WHEN 'male' THEN 'male'::customer_gender
-              WHEN 'female' THEN 'female'::customer_gender
-              WHEN 'other' THEN 'other'::customer_gender
-              WHEN 'unknown' THEN 'unspecified'::customer_gender
-              WHEN 'unspecified' THEN 'unspecified'::customer_gender
+              WHEN 'male' THEN 'male'
+              WHEN 'female' THEN 'female'
+              WHEN 'other' THEN 'other'
+              WHEN 'unknown' THEN 'unspecified'
+              WHEN 'unspecified' THEN 'unspecified'
               ELSE NULL
             END AS gender,
             /* Location: only cast if looks like JSON (starts with { or [) */
@@ -408,7 +402,7 @@ async function processCustomersCSV(
               ELSE NULL
             END AS location,
             phone
-          FROM stg_customers
+          FROM public.stg_customers
           WHERE job_id = ${jobId}
             AND external_id IS NOT NULL
             AND full_name IS NOT NULL
@@ -423,7 +417,7 @@ async function processCustomersCSV(
         succeeded = stagingData.length;
 
         // Analyze affected partitions
-        await db.execute(sql`ANALYZE customers`);
+        await db.execute(sql`ANALYZE gold.b2b_customers`);
 
         // Cleanup staging data
         await db.delete(stgCustomers).where(eq(stgCustomers.jobId, jobId));
