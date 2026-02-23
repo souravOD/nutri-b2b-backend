@@ -56,10 +56,22 @@ type BronzeTable =
 // Helpers
 // ────────────────────────────────────────────────────────────────
 
+/** Recursively sort object keys at every depth for deterministic serialization */
+function stableStringify(value: unknown): string {
+    if (value === null || value === undefined) return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+    if (typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        const keys = Object.keys(obj).sort();
+        const entries = keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`);
+        return `{${entries.join(",")}}`;
+    }
+    return JSON.stringify(value);
+}
+
 /** Compute a deterministic SHA-256 hash of the payload for deduplication */
 export function computeDataHash(vendorId: string, payload: Record<string, unknown>): string {
-    // Deterministic: sort keys, then hash vendorId + serialised payload
-    const canonical = JSON.stringify(payload, Object.keys(payload).sort());
+    const canonical = stableStringify(payload);
     return crypto
         .createHash("sha256")
         .update(`${vendorId}:${canonical}`)

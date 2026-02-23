@@ -40,12 +40,6 @@ type VendorRow = {
   domains: string[] | null;
 };
 
-const appwriteClient = new Client()
-  .setEndpoint(process.env.APPWRITE_ENDPOINT!)
-  .setProject(process.env.APPWRITE_PROJECT_ID!);
-
-const account = new Account(appwriteClient);
-
 // Re-export for any callers that imported from this file
 export { extractJWT };
 

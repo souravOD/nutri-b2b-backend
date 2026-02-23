@@ -1349,6 +1349,12 @@ export function registerRoutes(app: Express) {
         return res.status(400).json({ message: "Missing storage path. Call POST /jobs first." });
       }
 
+      // Validate path belongs to this vendor (prevent path traversal)
+      const expectedPrefix = `vendors/${vendorId}/`;
+      if (!storagePath.startsWith(expectedPrefix)) {
+        return res.status(403).json({ message: "Storage path does not belong to this vendor" });
+      }
+
       // Validate file
       const file = (req as any).file as Express.Multer.File | undefined;
       if (!file || !file.buffer?.length) {
@@ -1411,10 +1417,15 @@ export function registerRoutes(app: Express) {
     const runId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
 
-    const run = await getOrchestrationRunStatus(runId);
-    if (!run || run.vendor_id !== vendorId) {
+    // Verify vendor ownership via DB (orchestrator response may omit vendor_id)
+    const [dbRun] = await db.select({ vendorId: schema.orchestrationRuns.vendorId })
+      .from(schema.orchestrationRuns)
+      .where(eq(schema.orchestrationRuns.id, runId));
+    if (!dbRun || dbRun.vendorId !== vendorId) {
       return res.status(404).json({ message: "Run not found" });
     }
+
+    const run = await getOrchestrationRunStatus(runId);
 
     // Optionally fetch pipeline-level detail
     const pipelines = await db.select()
@@ -1464,7 +1475,7 @@ export function registerRoutes(app: Express) {
         stepName: s.stepName,
         status: s.status,
         errorMessage: s.errorMessage,
-        errorTraceback: s.errorTraceback,
+        // errorTraceback omitted — internal stack traces should not be exposed to tenants
         recordsIn: s.recordsIn,
         recordsOut: s.recordsOut,
         recordsError: s.recordsError,

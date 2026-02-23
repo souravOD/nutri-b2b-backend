@@ -11,7 +11,7 @@ import {
   type InsertCustomerHealthProfile,
 } from "../shared/schema.js";
 import { db } from "./lib/database.js";
-import { and, desc, eq, ilike, count, sql } from "drizzle-orm";
+import { and, desc, eq, count, sql } from "drizzle-orm";
 import { calculateHealthMetrics } from "./lib/health.js";
 
 export type Product = typeof products.$inferSelect;
@@ -184,12 +184,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const result = await db.select().from(users).where(ilike(users.email, email)).limit(1);
+    const normalized = email.trim().toLowerCase();
+    const result = await db.select().from(users).where(sql`lower(${users.email}) = ${normalized}`).limit(1);
     return result[0];
   }
 
   async createUser(user: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(user).returning();
+    const normalizedUser = { ...user, email: user.email.trim().toLowerCase() };
+    const result = await db.insert(users).values(normalizedUser).returning();
     return result[0];
   }
 
@@ -547,22 +549,32 @@ export class DatabaseStorage implements IStorage {
       derivedLimits: (patch as any).derivedLimits ?? undefined,
     };
 
+    // Merge with existing profile so partial updates still recompute BMI/TDEE
+    const [existingProfile] = await db.select()
+      .from(customerHealthProfiles)
+      .where(eq(customerHealthProfiles.customerId, customerId))
+      .limit(1);
+
+    const effectiveHeight = normalizedPatch.heightCm ?? existingProfile?.heightCm ?? null;
+    const effectiveWeight = normalizedPatch.weightKg ?? existingProfile?.weightKg ?? null;
+    const effectiveAge = normalizedPatch.age ?? existingProfile?.age ?? cust.age ?? null;
+
     const haveMetricsInputs =
-      normalizedPatch.heightCm != null &&
-      normalizedPatch.weightKg != null &&
-      normalizedPatch.age != null;
+      effectiveHeight != null &&
+      effectiveWeight != null &&
+      effectiveAge != null;
 
     if (haveMetricsInputs) {
       const metrics = calculateHealthMetrics({
-        heightCm: String(normalizedPatch.heightCm),
-        weightKg: String(normalizedPatch.weightKg),
-        age: Number(normalizedPatch.age),
-        gender: (normalizedPatch.gender as any) ?? "prefer_not_to_say",
-        activityLevel: normalizedPatch.activityLevel ?? "sedentary",
-        conditions: normalizedPatch.conditions ?? [],
-        dietGoals: normalizedPatch.dietGoals ?? [],
-        avoidAllergens: normalizedPatch.avoidAllergens ?? [],
-        macroTargets: (normalizedPatch.macroTargets as any) ?? {},
+        heightCm: String(effectiveHeight),
+        weightKg: String(effectiveWeight),
+        age: Number(effectiveAge),
+        gender: (normalizedPatch.gender as any) ?? existingProfile?.gender ?? "prefer_not_to_say",
+        activityLevel: normalizedPatch.activityLevel ?? existingProfile?.activityLevel ?? "sedentary",
+        conditions: normalizedPatch.conditions ?? existingProfile?.conditions ?? [],
+        dietGoals: normalizedPatch.dietGoals ?? existingProfile?.dietGoals ?? [],
+        avoidAllergens: normalizedPatch.avoidAllergens ?? existingProfile?.avoidAllergens ?? [],
+        macroTargets: (normalizedPatch.macroTargets as any) ?? (existingProfile?.macroTargets as any) ?? {},
       } as any);
 
       normalizedPatch.bmi = String(metrics.bmi);
@@ -622,7 +634,7 @@ export class DatabaseStorage implements IStorage {
       const existing = await tx
         .select({ id: customers.id })
         .from(customers)
-        .where(and(eq(customers.vendorId, vendorId), ilike(customers.email, customer.email)))
+        .where(and(eq(customers.vendorId, vendorId), sql`lower(${customers.email}) = ${customer.email.trim().toLowerCase()}`))
         .limit(1);
 
       let row: Customer;
