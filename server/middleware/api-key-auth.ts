@@ -194,6 +194,13 @@ export function universalAuth(requiredScopes?: string[]) {
                 const xTimestamp = req.headers["x-timestamp"] as string | undefined;
 
                 if (xTimestamp) {
+                    // Ensure x-timestamp is covered by the HMAC signature
+                    if (!parsed.signedHeaders.includes("x-timestamp")) {
+                        return res.status(401).json({
+                            code: "unsigned_timestamp",
+                            message: "x-timestamp header must be included in SignedHeaders",
+                        });
+                    }
                     // Strict mode: x-timestamp is an ISO date string
                     const delta = Math.abs(Date.now() - new Date(xTimestamp).getTime());
                     if (Number.isNaN(delta) || delta > STRICT_WINDOW_MS) {
