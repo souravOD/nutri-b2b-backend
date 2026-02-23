@@ -24,21 +24,35 @@ export const supabase = createClient(
 );
 
 export async function ensureBucket(name: string) {
-  const { data } = await supabaseAdmin.storage.getBucket(name);
-  if (!data) {
-    await supabaseAdmin.storage.createBucket(name, {
-      public: true,
-      fileSizeLimit: '104857600', // 100MB
-      allowedMimeTypes: ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
-    });
+  const { data, error: getErr } = await supabaseAdmin.storage.getBucket(name);
+  if (data) {
+    // Bucket already exists
+    return;
   }
+
+  // getBucket returned no data — bucket doesn't exist, try to create it
+  console.log(`[storage] Bucket "${name}" not found (${getErr?.message ?? 'no data'}), creating…`);
+  const { error: createErr } = await supabaseAdmin.storage.createBucket(name, {
+    public: false,
+    fileSizeLimit: 104857600, // 100MB
+    allowedMimeTypes: ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'],
+  });
+
+  if (createErr) {
+    // If the bucket was created by another concurrent request, that's OK
+    if (createErr.message?.includes('already exists')) {
+      console.log(`[storage] Bucket "${name}" was created concurrently — OK`);
+      return;
+    }
+    throw new Error(`Failed to create storage bucket "${name}": ${createErr.message}`);
+  }
+  console.log(`[storage] Bucket "${name}" created successfully`);
 }
 
 // TUS resumable upload helper
 export async function createResumableUpload(
   bucket: string,
   filePath: string,
-  maxFileSize = 10 * 1024 * 1024 * 1024 // 10GB
 ) {
   const { data, error } = await supabaseAdmin.storage
     .from(bucket)

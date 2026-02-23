@@ -5,7 +5,6 @@ import http from "http";
 import { registerRoutes } from "./routes.js";
 import { setupVite, serveStatic, log } from "./vite.js";
 import onboardRouter from "./routes/onboard.js";
-import { queueProcessor } from "./workers/queue-processor.js";
 
 const PORT = Number(process.env.PORT || 5000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -21,6 +20,7 @@ export default app;
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {
     if (req.path.startsWith("/api/onboard")) return next();
+    if (req.path.startsWith("/api/v1")) return next();  // ingest & keys API
     return res.status(404).json({
       ok: false,
       message:
@@ -82,7 +82,7 @@ export default app;
       res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
       res.header(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT"
+        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT, X-API-Key, Idempotency-Key"
       );
     };
 
@@ -141,12 +141,5 @@ export default app;
       console.log(`CORS (prod): ${configuredOrigins.length ? configuredOrigins.join(", ") : "(none)"}`);
     }
 
-    const jobsEnabled = process.env.B2B_ENABLE_JOBS === "1";
-    const queueEnabled = process.env.START_QUEUE === "1";
-    if (jobsEnabled && queueEnabled) {
-      queueProcessor.start().catch((err) => console.error("queue start error:", err));
-    } else {
-      console.log("Queue processor is disabled (set B2B_ENABLE_JOBS=1 and START_QUEUE=1 to enable).");
-    }
   });
 })();

@@ -11,7 +11,7 @@ export function ActiveJobsCard() {
     refetchInterval: 5000, // Poll every 5 seconds
   });
 
-  const activeJobs = (jobs as any)?.data?.filter((job: any) => 
+  const activeJobs = (jobs as any)?.data?.filter((job: any) =>
     ['running', 'failed'].includes(job.status)
   ) || [];
 
@@ -34,7 +34,7 @@ export function ActiveJobsCard() {
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle>Active Ingestion Jobs</CardTitle>
-          <Badge 
+          <Badge
             className="bg-orange-100 text-orange-800"
             data-testid="badge-active-jobs-count"
           >
@@ -66,8 +66,8 @@ export function ActiveJobsCard() {
         ) : (
           <div className="space-y-4">
             {activeJobs.slice(0, 3).map((job: any) => (
-              <div 
-                key={job.id} 
+              <div
+                key={job.id}
                 className={`flex items-center justify-between p-4 rounded-lg ${getJobBgColor(job.status)}`}
                 data-testid={`card-active-job-${job.id}`}
               >
@@ -77,36 +77,36 @@ export function ActiveJobsCard() {
                   </div>
                   <div className="ml-3">
                     <p className="text-sm font-medium text-gray-900" data-testid={`text-job-name-${job.id}`}>
-                      {job.mode === 'products' ? 'Products CSV' : 'Customers CSV'}
+                      {job.sourceName === 'products' ? 'Products CSV' : job.sourceName === 'customers' ? 'Customers CSV' : (job.sourceName || job.flowName || 'Ingestion')}
                     </p>
                     <p className="text-sm text-gray-500" data-testid={`text-job-details-${job.id}`}>
-                      {job.status === 'failed' 
-                        ? `Failed • ${job.error_url || 'Processing error'}`
-                        : `Started ${new Date(job.created_at).toLocaleTimeString()}`
+                      {job.status === 'failed'
+                        ? `Failed • ${job.errorMessage || 'Processing error'}`
+                        : `Started ${new Date(job.createdAt).toLocaleTimeString()}`
                       }
                     </p>
                   </div>
                 </div>
-                
+
                 {job.status === 'running' && (
                   <div className="flex items-center">
                     <div className="w-32 bg-gray-200 rounded-full h-2 mr-3">
-                      <div 
-                        className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                        style={{ width: `${job.progress_pct || 0}%` }}
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${job.progressPct || 0}%` }}
                         data-testid={`progress-${job.id}`}
                       />
                     </div>
                     <span className="text-sm font-medium text-gray-900" data-testid={`text-progress-${job.id}`}>
-                      {job.progress_pct || 0}%
+                      {job.progressPct || 0}%
                     </span>
                   </div>
                 )}
-                
+
                 {job.status === 'failed' && (
-                  <Button 
-                    size="sm" 
-                    variant="outline" 
+                  <Button
+                    size="sm"
+                    variant="outline"
                     className="text-red-600 hover:text-red-800"
                     data-testid={`button-view-errors-${job.id}`}
                   >
@@ -115,10 +115,10 @@ export function ActiveJobsCard() {
                 )}
               </div>
             ))}
-            
+
             <div className="text-center">
-              <Button 
-                variant="ghost" 
+              <Button
+                variant="ghost"
                 size="sm"
                 data-testid="button-view-all-jobs"
               >
