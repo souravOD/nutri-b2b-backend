@@ -267,6 +267,149 @@ export const auditLog = gold.table("audit_log", {
   recordIdx: index("audit_log_table_record_idx").on(table.tableName, table.recordId),
 }));
 
+// API Keys (gold schema)
+export const apiKeys = gold.table("api_keys", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  keyPrefix: varchar("key_prefix", { length: 20 }).notNull(),
+  keyHash: text("key_hash").notNull(),
+  hmacSecretRef: text("hmac_secret_ref"),
+  label: varchar("label", { length: 100 }),
+  environment: varchar("environment", { length: 10 }).notNull().default("live"),
+  scopes: text("scopes").array().default(sql`ARRAY['ingest:products', 'ingest:customers']`),
+  rateLimitRpm: integer("rate_limit_rpm").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  lastUsedAt: timestamp("last_used_at"),
+  expiresAt: timestamp("expires_at"),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  revokedAt: timestamp("revoked_at"),
+});
+
+// Bronze schema table references (for service layer)
+const bronze = pgSchema("bronze");
+
+export const rawProducts = bronze.table("raw_products", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id"),
+  sourceName: text("source_name").notNull(),
+  sourceRecordId: text("source_record_id"),
+  ingestionRunId: uuid("ingestion_run_id").notNull(),
+  rawPayload: jsonb("raw_payload").notNull(),
+  nutritionPayload: jsonb("nutrition_payload"),
+  assetPayload: jsonb("asset_payload"),
+  payloadLanguage: text("payload_language"),
+  fileName: text("file_name"),
+  rowNumber: integer("row_number"),
+  assetStorageUri: text("asset_storage_uri"),
+  imageUrlOriginal: text("image_url_original"),
+  imageEnriched: boolean("image_enriched").notNull().default(false),
+  enrichedImageUrl: text("enriched_image_url"),
+  arrivedAt: timestamp("arrived_at").notNull().default(sql`now()`),
+  dataHash: text("data_hash"),
+});
+
+export const rawCustomers = bronze.table("raw_customers", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id"),
+  sourceName: text("source_name").notNull(),
+  sourceRecordId: text("source_record_id"),
+  ingestionRunId: uuid("ingestion_run_id").notNull(),
+  customerType: text("customer_type").default("unknown"),
+  email: text("email"),
+  fullName: text("full_name"),
+  rawPayload: jsonb("raw_payload").notNull(),
+  payloadLanguage: text("payload_language"),
+  fileName: text("file_name"),
+  rowNumber: integer("row_number"),
+  arrivedAt: timestamp("arrived_at").notNull().default(sql`now()`),
+  dataHash: text("data_hash"),
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orchestration Schema (read-only from B2B — managed by Python orchestrator)
+// ─────────────────────────────────────────────────────────────────────────────
+const orchestration = pgSchema("orchestration");
+
+export const orchestrationRuns = orchestration.table("orchestration_runs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  flowName: varchar("flow_name", { length: 100 }).notNull(),
+  flowType: varchar("flow_type", { length: 30 }).notNull().default("batch"),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  triggerType: varchar("trigger_type", { length: 30 }).notNull(),
+  triggeredBy: varchar("triggered_by", { length: 255 }),
+  vendorId: uuid("vendor_id"),
+  sourceName: varchar("source_name", { length: 100 }),
+  layers: text("layers").array(),
+  currentLayer: varchar("current_layer", { length: 50 }),
+  progressPct: integer("progress_pct").default(0),
+  totalRecordsProcessed: integer("total_records_processed").default(0),
+  totalRecordsWritten: integer("total_records_written").default(0),
+  totalDqIssues: integer("total_dq_issues").default(0),
+  totalErrors: integer("total_errors").default(0),
+  totals: jsonb("totals").default(sql`'{}'::jsonb`),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  durationSeconds: numeric("duration_seconds", { precision: 10, scale: 2 }),
+  config: jsonb("config").default(sql`'{}'::jsonb`),
+  metadata: jsonb("metadata").default(sql`'{}'::jsonb`),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+});
+
+export const pipelineRuns = orchestration.table("pipeline_runs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  pipelineId: uuid("pipeline_id").notNull(),
+  pipelineName: varchar("pipeline_name", { length: 100 }),
+  orchestrationRunId: uuid("orchestration_run_id").notNull(),
+  runNumber: integer("run_number").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  triggerType: varchar("trigger_type", { length: 30 }).notNull().default("manual"),
+  triggeredBy: varchar("triggered_by", { length: 255 }),
+  sourceTable: varchar("source_table", { length: 100 }),
+  targetTable: varchar("target_table", { length: 100 }),
+  batchSize: integer("batch_size").default(100),
+  incremental: boolean("incremental").default(true),
+  dryRun: boolean("dry_run").default(false),
+  runConfig: jsonb("run_config").default(sql`'{}'::jsonb`),
+  recordsInput: integer("records_input").default(0),
+  recordsProcessed: integer("records_processed").default(0),
+  recordsWritten: integer("records_written").default(0),
+  recordsSkipped: integer("records_skipped").default(0),
+  recordsFailed: integer("records_failed").default(0),
+  dqIssuesFound: integer("dq_issues_found").default(0),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  durationSeconds: numeric("duration_seconds", { precision: 10, scale: 2 }),
+  errorMessage: text("error_message"),
+  errorDetails: jsonb("error_details"),
+  retryCount: integer("retry_count").default(0),
+  maxRetries: integer("max_retries").default(3),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+});
+
+export const pipelineStepLogs = orchestration.table("pipeline_step_logs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  pipelineRunId: uuid("pipeline_run_id").notNull(),
+  stepName: varchar("step_name", { length: 100 }).notNull(),
+  stepOrder: integer("step_order").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  recordsIn: integer("records_in").default(0),
+  recordsOut: integer("records_out").default(0),
+  recordsError: integer("records_error").default(0),
+  stateDelta: jsonb("state_delta").default(sql`'{}'::jsonb`),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  durationMs: integer("duration_ms"),
+  errorMessage: text("error_message"),
+  errorTraceback: text("error_traceback"),
+});
+
+// Orchestration types (read-only)
+export type OrchestrationRun = typeof orchestrationRuns.$inferSelect;
+export type PipelineRun = typeof pipelineRuns.$inferSelect;
+export type PipelineStepLog = typeof pipelineStepLogs.$inferSelect;
+
 // -----------------------------------------------------------------------------
 // Disconnected/legacy operational tables (kept in public schema for compatibility)
 // -----------------------------------------------------------------------------
@@ -418,6 +561,9 @@ export type CustomerHealthProfile = typeof customerHealthProfiles.$inferSelect;
 export type IngestionJob = typeof ingestionJobs.$inferSelect;
 export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
 export type AuditLogEntry = typeof auditLog.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type RawProduct = typeof rawProducts.$inferSelect;
+export type RawCustomer = typeof rawCustomers.$inferSelect;
 
 // Insert types
 export type InsertVendor = z.infer<typeof insertVendorSchema>;

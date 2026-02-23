@@ -96,26 +96,50 @@ export interface CustomerHealthProfile {
   updated_by?: string;
 }
 
-export interface IngestionJob {
+export interface OrchestrationRun {
   id: string;
-  vendor_id: string;
-  mode: 'products' | 'customers' | 'api_sync';
-  status: 'queued' | 'running' | 'failed' | 'completed' | 'canceled';
-  progress_pct: number;
-  totals?: {
-    processed?: number;
-    succeeded?: number;
-    failed?: number;
-    errors?: number;
-    warnings?: number;
-  };
-  error_url?: string;
-  started_at?: string;
-  finished_at?: string;
-  attempt: number;
-  params?: Record<string, any>;
-  created_at: string;
+  flowName: string;
+  flowType: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  triggerType: string;
+  triggeredBy?: string;
+  vendorId?: string;
+  sourceName?: string;
+  layers?: string[];
+  currentLayer?: string;
+  progressPct?: number;
+  totalRecordsProcessed?: number;
+  totalRecordsWritten?: number;
+  totalDqIssues?: number;
+  totalErrors?: number;
+  totals?: Record<string, any>;
+  startedAt?: string;
+  completedAt?: string;
+  durationSeconds?: string;
+  config?: Record<string, any>;
+  metadata?: Record<string, any>;
+  errorMessage?: string;
+  createdAt: string;
+  // Pipeline detail (populated by GET /jobs/:id)
+  pipelines?: PipelineRun[];
 }
+
+export interface PipelineRun {
+  id: string;
+  pipelineId: string;
+  pipelineName?: string;
+  orchestrationRunId: string;
+  status: string;
+  recordsInput?: number;
+  recordsProcessed?: number;
+  recordsWritten?: number;
+  recordsFailed?: number;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+/** @deprecated Use OrchestrationRun instead */
+export type IngestionJob = OrchestrationRun;
 
 export interface AuditLogEntry {
   id: string;

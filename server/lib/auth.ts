@@ -2,6 +2,14 @@ import type { Request, Response, NextFunction } from "express";
 import { Account, Client, Databases, Query, Teams } from "node-appwrite";
 import { db } from "./database.js";
 import { sql } from "drizzle-orm";
+import {
+  normalizeText,
+  normalizeLower,
+  normalizeRole,
+  emailDomain,
+  extractJWT,
+  type UserRole,
+} from "./auth-helpers.js";
 
 // Augment Express.Request with `auth`
 declare global {
@@ -38,12 +46,8 @@ const appwriteClient = new Client()
 
 const account = new Account(appwriteClient);
 
-export function extractJWT(req: Request): string | null {
-  const h = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
-  if (h?.startsWith("Bearer ")) return h.slice(7);
-  const x = req.headers["x-appwrite-jwt"];
-  return typeof x === "string" ? x : null;
-}
+// Re-export for any callers that imported from this file
+export { extractJWT };
 
 function computePermissions(role: AuthContext["role"]): string[] {
   if (role === "superadmin") return ["*"];
@@ -74,32 +78,6 @@ function computePermissions(role: AuthContext["role"]): string[] {
   }
   return ["read:products", "read:customers", "read:matches"];
 }
-
-const normalizeText = (v?: string | null) => {
-  const t = String(v || "").trim();
-  return t.length ? t : null;
-};
-
-const normalizeLower = (v?: string | null) => {
-  const t = normalizeText(v);
-  return t ? t.toLowerCase() : null;
-};
-
-const normalizeRole = (input?: string | null): AuthContext["role"] => {
-  const role = String(input || "viewer").toLowerCase();
-  if (role === "superadmin") return "superadmin";
-  if (role === "admin" || role === "vendor_admin") return "vendor_admin";
-  if (role === "operator" || role === "vendor_operator") return "vendor_operator";
-  return "vendor_viewer";
-};
-
-const emailDomain = (email?: string | null): string | null => {
-  const raw = String(email || "").trim().toLowerCase();
-  const at = raw.indexOf("@");
-  if (at < 0) return null;
-  const d = raw.slice(at + 1);
-  return d || null;
-};
 
 async function loadProfileHint(appwriteUserId: string) {
   const endpoint = process.env.APPWRITE_ENDPOINT;
@@ -290,9 +268,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       });
     }
 
-    // Validate with Appwrite
-    appwriteClient.setJWT(jwt);
-    const me = await account.get(); // throws if invalid
+    // Validate with Appwrite — create a per-request client to avoid
+    // race conditions from mutating the shared singleton with setJWT().
+    const perReqClient = new Client()
+      .setEndpoint(process.env.APPWRITE_ENDPOINT!)
+      .setProject(process.env.APPWRITE_PROJECT_ID!)
+      .setJWT(jwt);
+    const perReqAccount = new Account(perReqClient);
+    const me = await perReqAccount.get(); // throws if invalid
     const email = (me as any).email as string;
     const appwriteUserId = (me as any).$id as string;
 

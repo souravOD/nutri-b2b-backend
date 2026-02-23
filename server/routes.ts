@@ -1,11 +1,12 @@
 import type { Express, Request, Response, NextFunction, RequestHandler } from "express";
+import ingestRouter from "./routes/ingest.js";
 import { storage } from "./storage.js";
 import { extractJWT, requireAuth } from "./lib/auth.js";
-import { and, eq, desc, sql } from "drizzle-orm";
+import { and, eq, desc, sql, inArray } from "drizzle-orm";
 import * as schema from "../shared/schema.js";
 import { db } from "./lib/database.js";
 import { supabaseAdmin } from "./lib/supabase.js";     // service-role client
-import { queue } from "./lib/queue.js";                // your job queue
+import { triggerOrchestrator, getOrchestrationRunStatus, newRunId } from "./services/ingest-service.js";
 import { randomUUID } from "crypto";
 import {
   addCreatorAsTeamAdmin,
@@ -23,12 +24,8 @@ import {
   withSlugSuffix,
 } from "./lib/vendors.js";
 import { validateVendorRegistrationInput } from "./lib/validators/vendorRegistration.js";
-import Busboy from 'busboy';
-import { createClient } from "@supabase/supabase-js";
 import multer from "multer";
-
-
-const upload = multer({ storage: multer.memoryStorage() });
+import { ensureBucket } from "./lib/supabase.js";
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CSV_BUCKET = process.env.SUPABASE_CSV_BUCKET ?? "ingestion";
@@ -37,7 +34,7 @@ const uploadMw = multer({
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB
 });
 
-const JOBS_ENABLED = process.env.B2B_ENABLE_JOBS === "1";
+
 const MATCHING_ENABLED = process.env.B2B_ENABLE_MATCHING === "1";
 
 
@@ -76,12 +73,20 @@ function sniffCsvHeadersFromBuffer(buf: Buffer): string[] {
 }
 
 
-async function ensureBucket(name: string) {
-  const { data, error } = await supabaseAdmin.storage.listBuckets();
-  if (!error && !data?.some(b => b.name === name)) {
-    await supabaseAdmin.storage.createBucket(name, { public: false });
-  }
-}
+// ensureBucket is now imported from ./lib/supabase.js (M6 fix)
+
+// ── Hoisted helpers (L5: previously duplicated in POST & PUT /products) ──
+const toArr = (v: any): string[] | undefined => {
+  if (v == null) return undefined;
+  if (Array.isArray(v)) return v.filter(Boolean).map(String);
+  if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
+  return undefined;
+};
+const toNumStr = (n: any): string | undefined => {
+  if (n === undefined || n === null || n === "") return undefined;
+  const s = String(n);
+  return isNaN(Number(s)) ? undefined : s;
+};
 
 function ok(res: Response, data: any) {
   return res.status(200).type("application/json").json(data);
@@ -108,15 +113,15 @@ type Policy = {
 function mergePolicies(policies: Policy[]): Policy {
   const out: Policy = { hard_limits: {}, soft_limits: {}, required_tags: [], bonus_tags: [], penalty_tags: [] };
   for (const p of policies) {
-    if (p?.hard_limits)  Object.assign(out.hard_limits!, p.hard_limits);
-    if (p?.soft_limits)  Object.assign(out.soft_limits!, p.soft_limits);
+    if (p?.hard_limits) Object.assign(out.hard_limits!, p.hard_limits);
+    if (p?.soft_limits) Object.assign(out.soft_limits!, p.soft_limits);
     if (p?.required_tags) out.required_tags!.push(...p.required_tags);
-    if (p?.bonus_tags)    out.bonus_tags!.push(...p.bonus_tags);
-    if (p?.penalty_tags)  out.penalty_tags!.push(...p.penalty_tags);
+    if (p?.bonus_tags) out.bonus_tags!.push(...p.bonus_tags);
+    if (p?.penalty_tags) out.penalty_tags!.push(...p.penalty_tags);
   }
   out.required_tags = Array.from(new Set(out.required_tags));
-  out.bonus_tags    = Array.from(new Set(out.bonus_tags));
-  out.penalty_tags  = Array.from(new Set(out.penalty_tags));
+  out.bonus_tags = Array.from(new Set(out.bonus_tags));
+  out.penalty_tags = Array.from(new Set(out.penalty_tags));
   return out;
 }
 
@@ -124,8 +129,8 @@ function mergePolicies(policies: Policy[]): Policy {
 const withScorePct = (p: any) => {
   const raw01 =
     typeof p?._score === "number" ? p._score :
-    typeof p?.score  === "number" ? p.score  :
-    (typeof p?.score_pct === "number" ? p.score_pct / 100 : undefined);
+      typeof p?.score === "number" ? p.score :
+        (typeof p?.score_pct === "number" ? p.score_pct / 100 : undefined);
   if (raw01 == null) return p;
   const pct = Math.round(raw01 * 100);
   return { ...p, _score: raw01, score_pct: pct };
@@ -266,7 +271,7 @@ const withAuth = (handler: RequestHandler): RequestHandler => {
       // mirror onto req.auth for existing code that expects it
       try {
         if (!req.auth) req.auth = (res as any).locals?.auth;
-      } catch {}
+      } catch { }
       return handler(req, res, next);
     });
   };
@@ -275,11 +280,15 @@ const withAuth = (handler: RequestHandler): RequestHandler => {
 // ---------- ROUTES ----------
 
 export function registerRoutes(app: Express) {
+  // ── Ingest API (v1) ──
+  app.use("/api/v1/ingest", ingestRouter);
+  app.use("/api/v1", ingestRouter);  // keys endpoints at /api/v1/keys
+
   // health
   app.get("/health", (_req, res) => {
     ok(res, {
       status: "healthy",
-      timestamp: sql`now()`,
+      timestamp: new Date().toISOString(),
       version: process.env.npm_package_version ?? "dev",
     });
   });
@@ -535,15 +544,15 @@ export function registerRoutes(app: Express) {
     try {
       const s: any = storage as any;
       const vendorId = req.auth?.vendorId;
-    
-      const page  = Math.max(1, parseInt((req.query.page  as string) || "1"));
+
+      const page = Math.max(1, parseInt((req.query.page as string) || "1"));
       const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50")));
-    
-      const q          = (req.query.q as string) || undefined;
-      const brand      = (req.query.brand as string) || undefined;
-      const status     = (req.query.status as string) || undefined;
+
+      const q = (req.query.q as string) || undefined;
+      const brand = (req.query.brand as string) || undefined;
+      const status = (req.query.status as string) || undefined;
       const categoryId = (req.query.category_id as string) || undefined;
-    
+
       // If there's a search term or any filter, use the search path
       if ((q || brand || status || categoryId) && typeof s.searchProducts === "function") {
         const itemsOrResult = await s.searchProducts(
@@ -551,19 +560,19 @@ export function registerRoutes(app: Express) {
           q,
           { brand, status, categoryId, page, pageSize: limit }
         );
-    
-        const data  = (itemsOrResult?.items ?? itemsOrResult) || [];
+
+        const data = (itemsOrResult?.items ?? itemsOrResult) || [];
         const total = itemsOrResult?.total ?? (Array.isArray(data) ? data.length : 0);
 
         return ok(res, { data: Array.isArray(data) ? data.map(mapProductForApi) : [], page, pageSize: limit, total });
       }
-    
+
       if (typeof s.getProducts === "function") {
         const result = await s.getProducts(vendorId, { page, pageSize: limit });
         const data = Array.isArray(result) ? result.map(mapProductForApi) : [];
         return ok(res, data);
       }
-    
+
       return ok(res, { data: [], page, pageSize: limit, total: 0 });
     } catch (err: any) {
       return problem(res, 500, err?.message || "Failed to load products", req);
@@ -572,14 +581,18 @@ export function registerRoutes(app: Express) {
 
   // product by id
   app.get("/products/:id", withAuth(async (req: any, res) => {
-    const s: any = storage as any;
-    const vendorId = req.auth?.vendorId;
-    if (typeof s.getProduct === "function") {
-      const product = await s.getProduct(req.params.id, vendorId);
-      if (!product) return problem(res, 404, "Product not found", req);
-      return ok(res, mapProductForApi(product));
+    try {
+      const s: any = storage as any;
+      const vendorId = req.auth?.vendorId;
+      if (typeof s.getProduct === "function") {
+        const product = await s.getProduct(req.params.id, vendorId);
+        if (!product) return problem(res, 404, "Product not found", req);
+        return ok(res, mapProductForApi(product));
+      }
+      return problem(res, 404, "Product not found", req);
+    } catch (err: any) {
+      return problem(res, 500, err?.message || "Failed to load product", req);
     }
-    return problem(res, 404, "Product not found", req);
   }));
 
   // --- CREATE product ---
@@ -589,18 +602,7 @@ export function registerRoutes(app: Express) {
 
     const b = req.body ?? {};
 
-    // helpers
-    const toArr = (v: any): string[] | undefined => {
-      if (v == null) return undefined;
-      if (Array.isArray(v)) return v.filter(Boolean).map(String);
-      if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
-      return undefined;
-    };
-    const toNumStr = (n: any): string | undefined => {
-      if (n === undefined || n === null || n === "") return undefined;
-      const s = String(n);
-      return isNaN(Number(s)) ? undefined : s;
-    };
+    // helpers (hoisted to file level — see toArr / toNumStr above)
 
     // accept sku/external_id/externalId, require both externalId and name
     const externalId = (b.external_id ?? b.externalId ?? b.sku ?? "").toString().trim();
@@ -661,17 +663,7 @@ export function registerRoutes(app: Express) {
     const id = req.params.id;
 
     const b = req.body ?? {};
-    const toArr = (v: any): string[] | undefined => {
-      if (v == null) return undefined;
-      if (Array.isArray(v)) return v.filter(Boolean).map(String);
-      if (typeof v === "string") return v.split(",").map(s => s.trim()).filter(Boolean);
-      return undefined;
-    };
-    const toNumStr = (n: any): string | undefined => {
-      if (n === undefined || n === null || n === "") return undefined;
-      const s = String(n);
-      return isNaN(Number(s)) ? undefined : s;
-    };
+    // helpers (hoisted to file level — see toArr / toNumStr above)
 
     // Partial update (only apply provided fields)
     const updates: Partial<schema.InsertProduct> = {
@@ -776,14 +768,18 @@ export function registerRoutes(app: Express) {
 
   // customer by id
   app.get("/customers/:id", withAuth(async (req: any, res) => {
-    const s: any = storage as any;
-    const vendorId = req.auth?.vendorId;
-    if (typeof s.getCustomer === "function") {
-      const customer = await storage.getCustomerWithProfile(req.params.id, vendorId);
-      if (!customer) return problem(res, 404, "Customer not found", req);
-      return ok(res, mapCustomerForApi(customer));
+    try {
+      const s: any = storage as any;
+      const vendorId = req.auth?.vendorId;
+      if (typeof s.getCustomer === "function") {
+        const customer = await storage.getCustomerWithProfile(req.params.id, vendorId);
+        if (!customer) return problem(res, 404, "Customer not found", req);
+        return ok(res, mapCustomerForApi(customer));
+      }
+      return problem(res, 404, "Customer not found", req);
+    } catch (err: any) {
+      return problem(res, 500, err?.message || "Failed to load customer", req);
     }
-    return problem(res, 404, "Customer not found", req);
   }));
 
   // GET /taxonomy/diets?top=10[&all=1]
@@ -828,8 +824,8 @@ export function registerRoutes(app: Express) {
   // UPDATE customer (profile fields)
   app.patch("/customers/:id", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
-    const userId   = req.auth?.userId ?? null;
-    const id       = String(req.params.id);
+    const userId = req.auth?.userId ?? null;
+    const id = String(req.params.id);
     if (!vendorId) return problem(res, 403, "No vendor access", req);
 
     const b = (req.body ?? {}) as any;
@@ -874,10 +870,8 @@ export function registerRoutes(app: Express) {
 
     if (req.auth?.userId) updates.updatedBy = req.auth.userId;
 
-    // 🔎 Debug
-    console.log('[PATCH /customers/:id] body=', b);
-    console.log('[PATCH /customers/:id] updates=', updates);
-        
+    // Debug logging removed (M1 fix — was leaking PII)
+
     const base = await storage.updateCustomer(id, vendorId, updates);
     if (!base) return problem(res, 404, "Customer not found", req);
 
@@ -900,7 +894,7 @@ export function registerRoutes(app: Express) {
 
   app.patch("/customers/:id/products/:productId/notes", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
-    const userId   = req.auth?.userId ?? null;
+    const userId = req.auth?.userId ?? null;
     if (!vendorId) return problem(res, 403, "No vendor access", req);
     const note = (req.body?.note ?? req.body?.text ?? null) as string | null;
     const row = await (storage as any).upsertCustomerProductNote(
@@ -915,8 +909,8 @@ export function registerRoutes(app: Express) {
 
   // UPSERT health profile for a customer
   app.patch("/customers/:id/health", withAuth(async (req: any, res) => {
-    const vendorId   = req.auth?.vendorId;
-    const userId     = req.auth?.userId ?? null;
+    const vendorId = req.auth?.vendorId;
+    const userId = req.auth?.userId ?? null;
     const customerId = String(req.params.id);
     if (!vendorId) return problem(res, 403, "No vendor access", req);
 
@@ -930,22 +924,22 @@ export function registerRoutes(app: Express) {
 
     // Normalize request -> camelCase fields expected by Drizzle
     const patch = {
-      heightCm:       toNum(b.heightCm ?? b.height_cm),
-      weightKg:       toNum(b.weightKg ?? b.weight_kg),
-      age:            b.age !== undefined ? toNum(b.age) : undefined,
-      gender:         b.gender ?? undefined,
-      activityLevel:  (b.activityLevel ?? b.activity_level) !== undefined
+      heightCm: toNum(b.heightCm ?? b.height_cm),
+      weightKg: toNum(b.weightKg ?? b.weight_kg),
+      age: b.age !== undefined ? toNum(b.age) : undefined,
+      gender: b.gender ?? undefined,
+      activityLevel: (b.activityLevel ?? b.activity_level) !== undefined
         ? toGoldActivityLevel(b.activityLevel ?? b.activity_level)
         : undefined,
-      conditions:     Array.isArray(b.conditions) ? b.conditions : undefined,
-      dietGoals:      Array.isArray(b.dietGoals)  ? b.dietGoals  : undefined,
-      macroTargets:   b.macroTargets ?? b.macro_targets ?? undefined, // jsonb
+      conditions: Array.isArray(b.conditions) ? b.conditions : undefined,
+      dietGoals: Array.isArray(b.dietGoals) ? b.dietGoals : undefined,
+      macroTargets: b.macroTargets ?? b.macro_targets ?? undefined, // jsonb
       avoidAllergens: Array.isArray(b.avoidAllergens) ? b.avoidAllergens : undefined,
-      bmi:            toNum(b.bmi),
-      bmr:            toNum(b.bmr),
-      tdeeCached:     toNum(b.tdeeCached ?? b.tdee_cached),
-      derivedLimits:  b.derivedLimits ?? b.derived_limits ?? undefined,
-      updatedBy:      userId,
+      bmi: toNum(b.bmi),
+      bmr: toNum(b.bmr),
+      tdeeCached: toNum(b.tdeeCached ?? b.tdee_cached),
+      derivedLimits: b.derivedLimits ?? b.derived_limits ?? undefined,
+      updatedBy: userId,
     };
 
     // Drop only undefined (so 0 / empty-arrays still update)
@@ -967,7 +961,7 @@ export function registerRoutes(app: Express) {
   // routes.ts
   app.post("/customers", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
-    const userId   = req.auth?.userId ?? null;
+    const userId = req.auth?.userId ?? null;
     if (!vendorId) return problem(res, 403, "No vendor access", req);
 
     const b = req.body ?? {};
@@ -994,20 +988,20 @@ export function registerRoutes(app: Express) {
 
     const healthInput = h
       ? {
-          age: toNum(h.age),
-          gender: h.gender ?? undefined,
-          activityLevel: toGoldActivityLevel(h.activityLevel ?? undefined),
-          heightCm: h.heightCm !== undefined ? toStr(h.heightCm) : undefined, // numeric -> string
-          weightKg: h.weightKg !== undefined ? toStr(h.weightKg) : undefined, // numeric -> string
-          conditions: Array.isArray(h.conditions) ? h.conditions : [],
-          dietGoals: Array.isArray(h.dietGoals) ? h.dietGoals : [],
-          avoidAllergens: Array.isArray(h.avoidAllergens) ? h.avoidAllergens : [],
-          macroTargets: h.macroTargets ?? { protein_g: 0, carbs_g: 0, fat_g: 0, calories: 0 },
-          bmi: h.bmi !== undefined ? toStr(h.bmi) : null,
-          bmr: h.bmr !== undefined ? toStr(h.bmr) : null,
-          tdeeCached: h.tdeeCached !== undefined ? toStr(h.tdeeCached) : null,
-          derivedLimits: h.derivedLimits ?? null,
-        }
+        age: toNum(h.age),
+        gender: h.gender ?? undefined,
+        activityLevel: toGoldActivityLevel(h.activityLevel ?? undefined),
+        heightCm: h.heightCm !== undefined ? toStr(h.heightCm) : undefined, // numeric -> string
+        weightKg: h.weightKg !== undefined ? toStr(h.weightKg) : undefined, // numeric -> string
+        conditions: Array.isArray(h.conditions) ? h.conditions : [],
+        dietGoals: Array.isArray(h.dietGoals) ? h.dietGoals : [],
+        avoidAllergens: Array.isArray(h.avoidAllergens) ? h.avoidAllergens : [],
+        macroTargets: h.macroTargets ?? { protein_g: 0, carbs_g: 0, fat_g: 0, calories: 0 },
+        bmi: h.bmi !== undefined ? toStr(h.bmi) : null,
+        bmr: h.bmr !== undefined ? toStr(h.bmr) : null,
+        tdeeCached: h.tdeeCached !== undefined ? toStr(h.tdeeCached) : null,
+        derivedLimits: h.derivedLimits ?? null,
+      }
       : null;
 
     try {
@@ -1021,9 +1015,9 @@ export function registerRoutes(app: Express) {
         customer: mapCustomerForApi(created.customer),
         health: created.health
           ? {
-              ...created.health,
-              activityLevel: toUiActivityLevel((created.health as any).activityLevel),
-            }
+            ...created.health,
+            activityLevel: toUiActivityLevel((created.health as any).activityLevel),
+          }
           : null,
       });
     } catch (e: any) {
@@ -1044,58 +1038,58 @@ export function registerRoutes(app: Express) {
     const customerId = String(req.params.customerId);
     const limitRaw = Number(req.query.limit ?? req.query.top ?? 24);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 24;
-  
+
     // 1) Source of truth: vendor from the *customer* row
     const row = await db
       .select({ vendorId: schema.customers.vendorId })
       .from(schema.customers)
       .where(eq(schema.customers.id, customerId))
       .limit(1);
-  
+
     const vendorId: string | undefined = row?.[0]?.vendorId ?? req.auth?.vendorId;
     if (!vendorId) return ok(res, { data: [] });
-    
+
     let preferred: any[] = [];
     // 2) Try the service first
     const USE_SERVICE = process.env.USE_MATCHING_SERVICE === "1";
     if (USE_SERVICE) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const svc = require("./services/matching");
-       if (typeof svc.getMatchesForCustomer === "function") {
-         const raw = await svc.getMatchesForCustomer(vendorId, customerId, limit);
-         preferred = asArray(raw).map(withScorePct).slice(0, limit);
-       }
+        const svc = await import("./services/matching.js");
+        if (typeof svc.getMatchesForCustomer === "function") {
+          const raw = await svc.getMatchesForCustomer(vendorId, customerId, limit);
+          preferred = asArray(raw).map(withScorePct).slice(0, limit);
+        }
       } catch {
         // swallow & continue to fallback
       }
     }
-  
+
     // 3) Fallback: simple but faithful prefilter + scoring
     const p = schema.products;
-  
+
     // Bring in a bit of the profile (avoid + limits)
     const chp = schema.customerHealthProfiles;
     const cx = await db
       .select({
         avoidAllergens: chp.avoidAllergens,
-        dietGoals:     chp.dietGoals,
+        dietGoals: chp.dietGoals,
         derivedLimits: chp.derivedLimits,
-        conditions:    chp.conditions,
+        conditions: chp.conditions,
       })
       .from(chp)
       .where(eq(chp.customerId, customerId))
       .limit(1);
-  
+
     const avoidRaw = cx?.[0]?.avoidAllergens ?? [];
     const avoid: string[] = Array.isArray(avoidRaw) ? avoidRaw : [avoidRaw].filter(Boolean);
-    const goals  = cx?.[0]?.dietGoals ?? [];
+    const goals = cx?.[0]?.dietGoals ?? [];
     const limits = (cx?.[0]?.derivedLimits as any) ?? {};
     const conds = cx?.[0]?.conditions ?? [];
 
     // Fetch vendor diet policies for the customer's conditions
     const rules = conds.length
-    ? await db
+      ? await db
         .select({ policy: schema.dietRules.policy })
         .from(schema.dietRules)
         .where(and(
@@ -1103,35 +1097,35 @@ export function registerRoutes(app: Express) {
           sql`${schema.dietRules.conditionCode} = ANY (${textArray(conds as string[])})`,
           eq(schema.dietRules.active, true)
         ))
-    : [];
+      : [];
 
     // Merge policies into require/prefer/limits; combine with derivedLimits
     const merged = mergePolicies((rules ?? []).map((r: any) => r.policy));
     const requiredTags: string[] = merged.required_tags ?? [];
-    const preferTags  : string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...goals]));
-    const hardLimits  : Record<string, number> = { ...(merged.hard_limits ?? {}), ...limits };
-      
+    const preferTags: string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...goals]));
+    const hardLimits: Record<string, number> = { ...(merged.hard_limits ?? {}), ...limits };
+
     // vendor + active + NOT allergen conflicts (+ requiredTags if present)
     const whereClause = requiredTags.length
-    ? and(
+      ? and(
         eq(p.vendorId, vendorId),
         eq(p.status, "active"),
         sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`,
         sql`${textArray(requiredTags)} <@ coalesce(${p.dietaryTags}, '{}')`
       )
-    : and(
+      : and(
         eq(p.vendorId, vendorId),
         eq(p.status, "active"),
         sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`
       );
 
     const base = await db
-    .select()
-    .from(p)
-    .where(whereClause)
-    .orderBy(desc(p.updatedAt))
-    .limit(200);
-  
+      .select()
+      .from(p)
+      .where(whereClause)
+      .orderBy(desc(p.updatedAt))
+      .limit(200);
+
     // score like the service: preferences + small sodium penalty; only drop on *known* hard-limit exceed
     const now = Date.now();
     const items = base
@@ -1166,7 +1160,7 @@ export function registerRoutes(app: Express) {
       .filter(Boolean)
       .sort((a: any, b: any) => (b._score - a._score) || (b._updatedAtMs - a._updatedAtMs))
       .slice(0, limit);
-  
+
     return ok(res, { data: items });
   }));
 
@@ -1180,7 +1174,7 @@ export function registerRoutes(app: Express) {
         message: "Matching preview is temporarily disconnected. Neo4j integration is pending.",
       });
     }
-    try{
+    try {
       const customerId = String(req.params.customerId);
       const limitRaw = Number(req.query.limit ?? req.body?.limit ?? 24);
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 24;
@@ -1199,8 +1193,8 @@ export function registerRoutes(app: Express) {
       const base = await db
         .select({
           avoidAllergens: chp.avoidAllergens,
-          dietGoals:     chp.dietGoals,
-          conditions:    chp.conditions,
+          dietGoals: chp.dietGoals,
+          conditions: chp.conditions,
           derivedLimits: chp.derivedLimits,
         })
         .from(chp)
@@ -1209,9 +1203,9 @@ export function registerRoutes(app: Express) {
 
       const profile = {
         avoidAllergens: base?.[0]?.avoidAllergens ?? [],
-        dietGoals:      base?.[0]?.dietGoals ?? [],
-        conditions:     base?.[0]?.conditions ?? [],
-        derivedLimits:  (base?.[0]?.derivedLimits as any) ?? {},
+        dietGoals: base?.[0]?.dietGoals ?? [],
+        conditions: base?.[0]?.conditions ?? [],
+        derivedLimits: (base?.[0]?.derivedLimits as any) ?? {},
       };
 
       // Merge overrides (from UI) WITHOUT persisting
@@ -1219,15 +1213,15 @@ export function registerRoutes(app: Express) {
       const fromRequired = (b.required ?? []).filter(s => /^no\s+/i.test(s)).map(s => s.replace(/^no\s+/i, ""));
       const preview = {
         avoidAllergens: Array.from(new Set([...(profile.avoidAllergens ?? []), ...(b.allergens ?? []), ...fromRequired])),
-        dietGoals:      Array.from(new Set([...(profile.dietGoals ?? []), ...(b.preferred ?? [])])),
-        conditions:     Array.from(new Set([...(profile.conditions ?? []), ...(b.conditions ?? [])])),
-        derivedLimits:  profile.derivedLimits ?? {},
+        dietGoals: Array.from(new Set([...(profile.dietGoals ?? []), ...(b.preferred ?? [])])),
+        conditions: Array.from(new Set([...(profile.conditions ?? []), ...(b.conditions ?? [])])),
+        derivedLimits: profile.derivedLimits ?? {},
       };
 
       // Prefer service helper if enabled
       if (process.env.USE_MATCHING_SERVICE === "1") {
         try {
-          const svc = require("./services/matching");
+          const svc = await import("./services/matching.js");
           if (typeof svc.getMatchesForCustomerWithOverrides === "function") {
             const out = await svc.getMatchesForCustomerWithOverrides(vendorId, customerId, preview, limit, req);
             return ok(res, { data: (out?.items ?? out ?? []).slice(0, limit) });
@@ -1238,17 +1232,17 @@ export function registerRoutes(app: Express) {
       // Fallback: apply vendor diet_rules + allergens + limits
       const rules = preview.conditions?.length
         ? await db.select({ policy: schema.dietRules.policy })
-            .from(schema.dietRules)
-            .where(and(
-              eq(schema.dietRules.vendorId, vendorId),
-              sql`${schema.dietRules.conditionCode} = ANY (${textArray(preview.conditions)})`,
-              eq(schema.dietRules.active, true)
-            ))
+          .from(schema.dietRules)
+          .where(and(
+            eq(schema.dietRules.vendorId, vendorId),
+            sql`${schema.dietRules.conditionCode} = ANY (${textArray(preview.conditions)})`,
+            eq(schema.dietRules.active, true)
+          ))
         : [];
       const merged = mergePolicies((rules ?? []).map((r: any) => r.policy));
       const requiredTags: string[] = merged.required_tags ?? [];
-      const preferTags  : string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...(preview.dietGoals ?? [])]));
-      const hardLimits  : Record<string, number> = { ...(merged.hard_limits ?? {}), ...(preview.derivedLimits ?? {}) };
+      const preferTags: string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...(preview.dietGoals ?? [])]));
+      const hardLimits: Record<string, number> = { ...(merged.hard_limits ?? {}), ...(preview.derivedLimits ?? {}) };
 
       const p = schema.products;
       const conds: any[] = [
@@ -1256,11 +1250,11 @@ export function registerRoutes(app: Express) {
         eq(p.status, "active"),
         sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(preview.avoidAllergens ?? [])})`,
       ];
-      
+
       if (requiredTags.length) {
         conds.push(sql`${textArray(requiredTags)} <@ coalesce(${p.dietaryTags}, '{}')`);
       }
-      
+
       const baseRows = await db
         .select()
         .from(p)
@@ -1303,108 +1297,68 @@ export function registerRoutes(app: Express) {
       return res.status(500).type("application/json").json({ error: message });
     }
   }));
-    
+
   app.delete("/customers/:id", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
     const id = String(req.params.id);
     if (!vendorId) return problem(res, 403, "No vendor access", req);
-  
+
     const okDel = await storage.deleteCustomer(id, vendorId);
     if (!okDel) return problem(res, 404, "Customer not found", req);
-  
+
     return res.status(204).send(); // Frontend accepts 204 or 200
   }));
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Ingestion endpoints
-// ─────────────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Ingestion endpoints (backed by orchestration.* schema)
+  // ─────────────────────────────────────────────────────────────────────────────
 
-  // Create a job and tell the client where to upload the CSV
+  // Create an upload target for a CSV import.
+  // Returns the Supabase Storage bucket + path the frontend should upload to.
   app.post("/jobs", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      return res.status(503).json({
-        ok: false,
-        code: "JOBS_DISABLED",
-        message: "Jobs and ingestion are temporarily disconnected in this phase.",
-      });
-    }
     const vendorId = req.auth?.vendorId as string | undefined;
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
     const mode = ((req.query.mode as string) || "products") as "products" | "customers" | "api_sync";
 
-    // create job
-    const [job] = await db.insert(schema.ingestionJobs).values({
-      vendorId,               // NOTE: camelCase – matches your other tables (e.g., customerId usage)
-      mode,
-      status: "queued",       // enum-safe; we'll flip to "running" in /start
-      progressPct: 0,
-      params: { source: "csv", name: `Import ${mode} CSV` },
-    }).returning({ id: schema.ingestionJobs.id });
+    const runId = newRunId();
+    const storagePath = computeStoragePath(vendorId, runId, mode);
+    await ensureBucket(CSV_BUCKET);
 
-    const jobId = job.id as string;
-    const storagePath = computeStoragePath(vendorId, jobId, mode);
-    // after computing storagePath:
-    await ensureBucket(CSV_BUCKET); // <— add
-    // pre-store exact location so the UI knows and the worker doesn't guess
-    await db.update(schema.ingestionJobs)
-      .set({ params: { source: "csv", bucket: CSV_BUCKET, path: storagePath } })
-      .where(eq(schema.ingestionJobs.id, jobId));
-
-    return ok(res, { jobId, bucket: CSV_BUCKET, path: storagePath });
+    return ok(res, { runId, bucket: CSV_BUCKET, path: storagePath, mode });
   }));
 
   type MulterRequest = Request & {
     file?: Express.Multer.File;
     files?: Express.Multer.File[];
-  };  
-  // Upload the CSV (multipart/form-data; field name MUST be 'file')
-  app.post("/jobs/:id/upload",
-    uploadMw.single("file"),        // <— field name MUST be "file"
+  };
+
+  // Upload CSV + trigger the orchestrator.
+  // Returns the orchestration run_id for the frontend to poll.
+  app.post("/jobs/upload",
+    uploadMw.single("file"),
     withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-        return res.status(503).json({
-          ok: false,
-          code: "JOBS_DISABLED",
-          message: "Jobs and ingestion are temporarily disconnected in this phase.",
-        });
-      }
       const vendorId = req.auth?.vendorId as string | undefined;
-      const jobId = String(req.params.id);
-      const mode = String(req.query.mode || "products") as "products" | "customers" | "api_sync";
       if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
-  
-      // 1) Read job and its planned bucket/path
-      const [row] = await db
-        .select({
-          id: schema.ingestionJobs.id,
-          vendorId: schema.ingestionJobs.vendorId,
-          mode: schema.ingestionJobs.mode,
-          params: schema.ingestionJobs.params,
-        })
-        .from(schema.ingestionJobs)
-        .where(and(
-          eq(schema.ingestionJobs.id, jobId),
-          eq(schema.ingestionJobs.vendorId, vendorId),
-        ));
-  
-      if (!row) return res.status(404).json({ message: "Job not found" });
-  
-      const p = (row.params || {}) as any;
-      const bucket = String(p.bucket || process.env.SUPABASE_CSV_BUCKET || "ingestion");
-      // If /jobs created 'path' already, use it; otherwise generate a sane default
-      const storagePath = computeStoragePath(vendorId, jobId, mode);
-  
-      // 2) Validate file
+
+      const mode = String(req.body?.mode || req.query.mode || "products");
+      const bucket = String(req.body?.bucket || CSV_BUCKET);
+      const storagePath = String(req.body?.path || req.query.path || "");
+
+      if (!storagePath) {
+        return res.status(400).json({ message: "Missing storage path. Call POST /jobs first." });
+      }
+
+      // Validate file
       const file = (req as any).file as Express.Multer.File | undefined;
       if (!file || !file.buffer?.length) {
         return res.status(400).json({ message: "Missing CSV file in 'file' field" });
       }
-  
-      // 3) Ensure bucket exists
-      try { await ensureBucket(bucket); } catch (_) {}
-  
-      // 4) Upload bytes using SERVICE-ROLE client
+
+      // 1. Ensure bucket exists
+      try { await ensureBucket(bucket); } catch (_) { }
+
+      // 2. Upload to Supabase Storage
       const { error: upErr } = await supabaseAdmin
         .storage
         .from(bucket)
@@ -1417,287 +1371,137 @@ export function registerRoutes(app: Express) {
         console.error("[upload] Supabase upload failed:", upErr);
         return res.status(502).json({ message: `Storage upload failed: ${upErr.message}` });
       }
-        
-      // 5) Mark the job as 'uploaded'
-      await db.update(schema.ingestionJobs)
-        .set({
-          params: {
-            ...p,
-            bucket,
-            path: storagePath,
-            contentType: file.mimetype || "text/csv",
-            fileSize: file.size,
-            uploaded: true,               // <— THIS IS WHAT THE WORKER READS
-            source: p.source || "csv",
-          },
-          progressPct: 25,
-        })
-        .where(eq(schema.ingestionJobs.id, jobId));
-  
-      return ok(res, {
-        ok: true,
-        bucket,
-        path: storagePath,
-        size: file.size,
-        mime: file.mimetype || "text/csv",
-      });
+
+      // 3. Trigger orchestrator — it creates the orchestration_run and returns run_id
+      try {
+        const trigger = await triggerOrchestrator({
+          flow_name: "full_ingestion",
+          vendor_id: vendorId,
+          source_name: mode,
+          storage_bucket: bucket,
+          storage_path: storagePath,
+        });
+
+        return ok(res, {
+          run_id: trigger.run_id,
+          status: trigger.status,
+          flow_name: trigger.flow_name,
+          bucket,
+          path: storagePath,
+          size: file.size,
+          mime: file.mimetype || "text/csv",
+        });
+      } catch (triggerErr: any) {
+        // Upload succeeded but orchestrator trigger failed.
+        // Return partial success so the frontend knows the file is uploaded.
+        console.error("[upload] Orchestrator trigger failed:", triggerErr);
+        return res.status(202).json({
+          message: "CSV uploaded but orchestrator trigger failed. The file is stored and can be retried.",
+          bucket,
+          path: storagePath,
+          error: triggerErr?.message,
+        });
+      }
     })
   );
 
-  // Start processing (mark running and enqueue)
-  app.post("/jobs/:id/start", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      return res.status(503).json({
-        ok: false,
-        code: "JOBS_DISABLED",
-        message: "Jobs and ingestion are temporarily disconnected in this phase.",
-      });
-    }
-    const vendorId = req.auth?.vendorId as string | undefined;
-    const jobId = String(req.params.id);
-    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
-  
-    const [row] = await db.select({
-      params: schema.ingestionJobs.params
-    }).from(schema.ingestionJobs)
-      .where(and(
-        eq(schema.ingestionJobs.id, jobId),
-        eq(schema.ingestionJobs.vendorId, vendorId),
-      ));
-  
-    const p = (row?.params || {}) as any;
-    if (!p.bucket || !p.path || !p.uploaded) {
-      return res.status(409).json({ message: "CSV not uploaded yet" });
-    }
-  
-    const mapping = (req.body && (req.body.mapping || (req.body as any).map)) || null;
-  
-    await db.update(schema.ingestionJobs)
-      .set({ status: "queued", startedAt: null, params: { ...p, ...(mapping ? { mapping } : {}) } })
-      .where(eq(schema.ingestionJobs.id, jobId));
-  
-    return ok(res, { ok: true });
-  }));
-
-  // Single job (polled by the wizard)
+  // Get a single orchestration run (polled by the frontend wizard for progress)
   app.get("/jobs/:id", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      return ok(res, { id: String(req.params.id), status: "queued", progressPct: 0, disabled: true });
-    }
     const vendorId = req.auth?.vendorId as string | undefined;
-    const jobId = String(req.params.id);
+    const runId = String(req.params.id);
     if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
 
-    const [job] = await db
-      .select()
-      .from(schema.ingestionJobs)
-      .where(and(
-        eq(schema.ingestionJobs.id, jobId),
-        eq(schema.ingestionJobs.vendorId, vendorId),
-      ));
-    if (!job) return res.status(404).json({ message: "Job not found" });
+    const run = await getOrchestrationRunStatus(runId);
+    if (!run || run.vendor_id !== vendorId) {
+      return res.status(404).json({ message: "Run not found" });
+    }
 
-    return ok(res, job);
+    // Optionally fetch pipeline-level detail
+    const pipelines = await db.select()
+      .from(schema.pipelineRuns)
+      .where(eq(schema.pipelineRuns.orchestrationRunId, runId))
+      .orderBy(schema.pipelineRuns.createdAt);
+
+    return ok(res, { ...run, pipelines });
   }));
 
-  // Job errors (JSON)
+  // Get errors for an orchestration run (step-level failure details)
   app.get("/jobs/:id/errors", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
+    const vendorId = req.auth?.vendorId as string | undefined;
+    const runId = String(req.params.id);
+    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
+
+    // Verify vendor owns this run
+    const [run] = await db.select({ vendorId: schema.orchestrationRuns.vendorId })
+      .from(schema.orchestrationRuns)
+      .where(eq(schema.orchestrationRuns.id, runId));
+    if (!run || run.vendorId !== vendorId) {
+      return res.status(404).json({ message: "Run not found" });
+    }
+
+    // Get all pipeline runs for this orchestration run
+    const pipelines = await db.select({ id: schema.pipelineRuns.id })
+      .from(schema.pipelineRuns)
+      .where(eq(schema.pipelineRuns.orchestrationRunId, runId));
+
+    const pipelineIds = pipelines.map(p => p.id);
+    if (!pipelineIds.length) {
       return ok(res, { data: [] });
     }
-    const vendorId = req.auth?.vendorId as string | undefined;
-    const jobId = String(req.params.id);
-    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
 
-    // Ensure the job belongs to this vendor
-    const [job] = await db
-      .select({ id: schema.ingestionJobs.id, vendorId: schema.ingestionJobs.vendorId })
-      .from(schema.ingestionJobs)
-      .where(eq(schema.ingestionJobs.id, jobId));
-    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
+    // Get step logs for failed steps
+    const stepLogs = await db.select()
+      .from(schema.pipelineStepLogs)
+      .where(
+        and(
+          inArray(schema.pipelineStepLogs.pipelineRunId, pipelineIds),
+          eq(schema.pipelineStepLogs.status, "failed"),
+        )
+      );
 
-    const rows = await db
-      .select({
-        id: schema.ingestionJobErrors.id,
-        rowNo: schema.ingestionJobErrors.rowNo,
-        field: schema.ingestionJobErrors.field,
-        code: schema.ingestionJobErrors.code,
-        message: schema.ingestionJobErrors.message,
-        raw: schema.ingestionJobErrors.raw,
-      })
-      .from(schema.ingestionJobErrors)
-      .where(eq(schema.ingestionJobErrors.jobId, jobId));
-
-    return ok(res, { data: rows });
-  }));
-
-  // Job errors CSV download
-  app.get("/jobs/:id/errors.csv", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      return res.status(200).send("row_no,field,code,message,raw\n");
-    }
-    const vendorId = req.auth?.vendorId as string | undefined;
-    const jobId = String(req.params.id);
-    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
-
-    const [job] = await db
-      .select({ id: schema.ingestionJobs.id, vendorId: schema.ingestionJobs.vendorId })
-      .from(schema.ingestionJobs)
-      .where(eq(schema.ingestionJobs.id, jobId));
-    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
-
-    const rows = await db
-      .select({
-        rowNo: schema.ingestionJobErrors.rowNo,
-        field: schema.ingestionJobErrors.field,
-        code: schema.ingestionJobErrors.code,
-        message: schema.ingestionJobErrors.message,
-        raw: schema.ingestionJobErrors.raw,
-      })
-      .from(schema.ingestionJobErrors)
-      .where(eq(schema.ingestionJobErrors.jobId, jobId));
-
-    const header = ["row_no", "field", "code", "message", "raw"].join(",");
-    const lines = rows.map((r: any) => {
-      const esc = (s: any) => {
-        const str = s == null ? "" : typeof s === "string" ? s : JSON.stringify(s);
-        return '"' + String(str).replaceAll('"', '""') + '"';
-      };
-      return [r.rowNo, r.field ?? "", r.code ?? "", r.message ?? "", esc(r.raw ?? {})].join(",");
+    return ok(res, {
+      data: stepLogs.map(s => ({
+        stepName: s.stepName,
+        status: s.status,
+        errorMessage: s.errorMessage,
+        errorTraceback: s.errorTraceback,
+        recordsIn: s.recordsIn,
+        recordsOut: s.recordsOut,
+        recordsError: s.recordsError,
+        durationMs: s.durationMs,
+      })),
     });
-    const csv = [header, ...lines].join("\n");
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename=job_${jobId}_errors.csv`);
-    return res.status(200).send(csv);
   }));
 
-  // Export items CSV (best-effort)
-  app.get("/jobs/:id/items.csv", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      return res.status(200).send("note\n\"Jobs are temporarily disconnected\"\n");
-    }
-    const vendorId = req.auth?.vendorId as string | undefined;
-    const jobId = String(req.params.id);
-    if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
-
-    const [job] = await db
-      .select()
-      .from(schema.ingestionJobs)
-      .where(eq(schema.ingestionJobs.id, jobId));
-    if (!job || job.vendorId !== vendorId) return res.status(404).json({ message: "Job not found" });
-
-    const mode = String(job.mode || "products");
-    let header = "";
-    let rows: any[] = [];
-
-    if (mode === "products") {
-      // Try staging first (may be deleted post-merge)
-      rows = await db
-        .select({
-          externalId: schema.stgProducts.externalId,
-          name: schema.stgProducts.name,
-          brand: schema.stgProducts.brand,
-          categoryId: schema.stgProducts.categoryId,
-          price: schema.stgProducts.price,
-          currency: schema.stgProducts.currency,
-        })
-        .from(schema.stgProducts)
-        .where(eq(schema.stgProducts.jobId, jobId));
-      header = "external_id,name,brand,category_id,price,currency";
-    } else if (mode === "customers") {
-      rows = await db
-        .select({
-          externalId: schema.stgCustomers.externalId,
-          fullName: schema.stgCustomers.fullName,
-          email: schema.stgCustomers.email,
-          phone: schema.stgCustomers.phone,
-        })
-        .from(schema.stgCustomers)
-        .where(eq(schema.stgCustomers.jobId, jobId));
-      header = "external_id,full_name,email,phone";
-    } else {
-      return res.status(501).json({ message: `Export not implemented for mode ${mode}` });
-    }
-
-    const esc = (s: any) => '"' + String(s ?? "").replaceAll('"', '""') + '"';
-    const csvLines = [header];
-    if (mode === "products") {
-      csvLines.push(...rows.map((r: any) => [r.externalId, r.name, r.brand, r.categoryId, r.price, r.currency].map(esc).join(",")));
-    } else {
-      csvLines.push(...rows.map((r: any) => [r.externalId, r.fullName, r.email, r.phone].map(esc).join(",")));
-    }
-
-    if (rows.length === 0) {
-      csvLines.push('"No staging rows available for this job (the worker may have already cleaned up)."');
-    }
-
-    const out = csvLines.join("\n");
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename=job_${jobId}_items.csv`);
-    return res.status(200).send(out);
-  }));
-
-  // Jobs list (used by the Jobs page and Search)
+  // List orchestration runs for a vendor (Jobs page and Search)
   app.get("/jobs", withAuth(async (req: any, res) => {
-    if (!JOBS_ENABLED) {
-      return ok(res, { data: [], page: 1, pageSize: 0, total: 0, disabled: true });
-    }
     const vendorId = req.auth?.vendorId as string;
-    const qRaw = (req.query.q as string) ?? "";
-    const q = qRaw.trim().toLowerCase();
-    const statusUi = (req.query.status as string) || undefined;
-    const typeUi = (req.query.type as string) || undefined; // Import|Export|Match (currently only Import maps)
+    const statusFilter = (req.query.status as string) || undefined;
     const limitRaw = Number(req.query.limit ?? 100);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, limitRaw)) : 100;
 
-    // Map UI status to DB enum
-    const statusMap: Record<string, string> = {
-      running: "running",
-      completed: "completed",
-      failed: "failed",
-      pending: "queued",
-      queued: "queued",
-      processing: "running",
-    };
-    const dbStatus = statusUi ? statusMap[String(statusUi).toLowerCase()] : undefined;
+    const conditions = [eq(schema.orchestrationRuns.vendorId, vendorId)];
+    if (statusFilter) {
+      // Map UI status names to orchestration status
+      const statusMap: Record<string, string> = {
+        running: "running",
+        completed: "completed",
+        failed: "failed",
+        pending: "pending",
+        queued: "pending",
+        processing: "running",
+      };
+      const dbStatus = statusMap[statusFilter.toLowerCase()] || statusFilter;
+      conditions.push(eq(schema.orchestrationRuns.status, dbStatus));
+    }
 
-    // Base query scoped to vendor
-    let base = await db.select().from(schema.ingestionJobs)
-      .where(eq(schema.ingestionJobs.vendorId, vendorId))
-      .orderBy(desc(schema.ingestionJobs.createdAt ?? sql`now()`))
+    const runs = await db.select()
+      .from(schema.orchestrationRuns)
+      .where(and(...conditions))
+      .orderBy(desc(schema.orchestrationRuns.createdAt))
       .limit(limit);
 
-    // In-memory filters for q/type/status (cheap list)
-    if (dbStatus) {
-      base = base.filter((j: any) => String(j.status).toLowerCase() === dbStatus);
-    }
-    if (typeUi) {
-      const t = String(typeUi).toLowerCase();
-      // Today: products/customers/api_sync -> Import; keep flexible for future mapping
-      base = base.filter((j: any) =>
-        (t === "import" && ["products","customers","api_sync"].includes(String(j.mode).toLowerCase()))
-        || (t === "match" && String(j.mode).toLowerCase().includes("match"))
-        || (t === "export" && String(j.mode).toLowerCase().includes("export"))
-      );
-    }
-    if (q) {
-      base = base.filter((j: any) => {
-        const created = j.createdAt ? new Date(j.createdAt).toISOString().toLowerCase() : "";
-        const p = (j.params || {}) as any;
-        return (
-          String(j.id).toLowerCase().includes(q)
-          || String(j.mode ?? "").toLowerCase().includes(q)
-          || String(j.status ?? "").toLowerCase().includes(q)
-          || String(p?.source ?? "").toLowerCase().includes(q)
-          || String(p?.name ?? "").toLowerCase().includes(q)
-          || created.includes(q)
-        );
-      });
-    }
-
-    return ok(res, { data: base, page: 1, pageSize: base.length, total: base.length });
+    return ok(res, { data: runs, page: 1, pageSize: runs.length, total: runs.length });
   }));
 
   // database health (if implemented)

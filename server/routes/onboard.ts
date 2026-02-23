@@ -8,6 +8,13 @@ import {
 } from "node-appwrite";
 import { db } from "../lib/database.js";
 import { sql } from "drizzle-orm";
+import {
+  normalizeText,
+  normalizeLower,
+  normalizeRole,
+  emailDomain,
+  extractJWT as extractJwt,
+} from "../lib/auth-helpers.js";
 
 const router = Router();
 
@@ -64,38 +71,7 @@ type TeamMembershipHit = {
   role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
 };
 
-const normalizeText = (value?: string | null): string | null => {
-  const v = String(value || "").trim();
-  return v.length ? v : null;
-};
 
-const normalizeLower = (value?: string | null): string | null => {
-  const v = normalizeText(value);
-  return v ? v.toLowerCase() : null;
-};
-
-const emailDomain = (email?: string | null): string | null => {
-  const at = String(email || "").indexOf("@");
-  if (at < 0) return null;
-  const d = String(email).slice(at + 1).trim().toLowerCase();
-  return d || null;
-};
-
-function normalizeRole(input?: string | null): DbUserLinkRow["role"] {
-  const role = String(input || "viewer").toLowerCase();
-  if (role === "superadmin") return "superadmin";
-  if (role === "admin" || role === "vendor_admin") return "vendor_admin";
-  if (role === "operator" || role === "vendor_operator") return "vendor_operator";
-  return "vendor_viewer";
-}
-
-function extractJwt(req: Request): string | null {
-  const auth = req.headers.authorization;
-  if (auth && /^bearer\s+/i.test(auth)) return auth.replace(/^bearer\s+/i, "").trim();
-  const x = req.headers["x-appwrite-jwt"];
-  if (typeof x === "string" && x.trim().length > 0) return x.trim();
-  return null;
-}
 
 function jsonError(
   res: Response,

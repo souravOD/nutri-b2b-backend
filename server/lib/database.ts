@@ -22,7 +22,7 @@ function buildPool(url: string) {
   });
 }
 
-const primaryPool = buildPool(PRIMARY_URL);
+export const primaryPool = buildPool(PRIMARY_URL);
 
 // Try to create a read pool; if anything goes wrong, reuse primary
 let replicaPool = primaryPool;

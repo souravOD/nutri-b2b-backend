@@ -21,7 +21,7 @@ export default function Ingestion() {
         return <AlertCircle className="w-4 h-4 text-red-600" />;
       case 'running':
         return <Play className="w-4 h-4 text-blue-600" />;
-      case 'queued':
+      case 'pending':
         return <Clock className="w-4 h-4 text-yellow-600" />;
       default:
         return <Pause className="w-4 h-4 text-gray-600" />;
@@ -36,7 +36,7 @@ export default function Ingestion() {
         return 'bg-red-100 text-red-800';
       case 'running':
         return 'bg-blue-100 text-blue-800';
-      case 'queued':
+      case 'pending':
         return 'bg-yellow-100 text-yellow-800';
       default:
         return 'bg-gray-100 text-gray-800';
@@ -47,11 +47,11 @@ export default function Ingestion() {
     <div className="flex min-h-screen bg-gray-50">
       <Sidebar />
       <main className="flex-1 overflow-auto">
-        <TopBar 
-          title="Data Ingestion" 
+        <TopBar
+          title="Data Ingestion"
           subtitle="Monitor CSV imports and API synchronization jobs"
         />
-        
+
         <div className="p-6 space-y-6">
           <div className="flex justify-between items-center">
             <div>
@@ -89,7 +89,7 @@ export default function Ingestion() {
                 </div>
               </CardContent>
             </Card>
-            
+
             <Card>
               <CardContent className="p-4">
                 <div className="flex items-center">
@@ -99,13 +99,13 @@ export default function Ingestion() {
                   <div className="ml-3">
                     <p className="text-sm font-medium text-gray-500">Queued</p>
                     <p className="text-xl font-semibold text-gray-900" data-testid="text-queued-count">
-                      {jobs?.data?.filter((job: any) => job.status === 'queued').length || 0}
+                      {jobs?.data?.filter((job: any) => job.status === 'pending').length || 0}
                     </p>
                   </div>
                 </div>
               </CardContent>
             </Card>
-            
+
             <Card>
               <CardContent className="p-4">
                 <div className="flex items-center">
@@ -121,7 +121,7 @@ export default function Ingestion() {
                 </div>
               </CardContent>
             </Card>
-            
+
             <Card>
               <CardContent className="p-4">
                 <div className="flex items-center">
@@ -181,14 +181,14 @@ export default function Ingestion() {
                         <div>
                           <div className="flex items-center space-x-2">
                             <h4 className="font-medium text-gray-900" data-testid={`text-job-type-${job.id}`}>
-                              {job.mode === 'products' ? 'Products Import' : 'Customers Import'}
+                              {job.sourceName === 'products' ? 'Products Import' : job.sourceName === 'customers' ? 'Customers Import' : (job.sourceName || job.flowName || 'Import')}
                             </h4>
                             <Badge className={`text-xs ${getStatusColor(job.status)}`} data-testid={`badge-status-${job.id}`}>
                               {job.status}
                             </Badge>
                           </div>
                           <p className="text-sm text-gray-500" data-testid={`text-job-time-${job.id}`}>
-                            Started {new Date(job.created_at).toLocaleString()}
+                            Started {new Date(job.createdAt).toLocaleString()}
                           </p>
                         </div>
                       </div>
@@ -197,20 +197,20 @@ export default function Ingestion() {
                         {job.status === 'running' && (
                           <div className="flex items-center space-x-2">
                             <div className="w-32">
-                              <Progress value={job.progress_pct} className="h-2" data-testid={`progress-${job.id}`} />
+                              <Progress value={job.progressPct} className="h-2" data-testid={`progress-${job.id}`} />
                             </div>
                             <span className="text-sm font-medium text-gray-700" data-testid={`text-progress-${job.id}`}>
-                              {job.progress_pct}%
+                              {job.progressPct || 0}%
                             </span>
                           </div>
                         )}
 
                         {job.totals && (
                           <div className="text-right text-sm text-gray-600" data-testid={`text-totals-${job.id}`}>
-                            <div>Processed: {job.totals.processed || 0}</div>
-                            <div>Succeeded: {job.totals.succeeded || 0}</div>
-                            {job.totals.failed > 0 && (
-                              <div className="text-red-600">Failed: {job.totals.failed}</div>
+                            <div>Processed: {(job.totals as any).processed || job.totalRecordsProcessed || 0}</div>
+                            <div>Written: {(job.totals as any).succeeded || job.totalRecordsWritten || 0}</div>
+                            {(job.totalErrors || 0) > 0 && (
+                              <div className="text-red-600">Errors: {job.totalErrors}</div>
                             )}
                           </div>
                         )}
@@ -219,7 +219,7 @@ export default function Ingestion() {
                           <Button size="sm" variant="outline" data-testid={`button-view-${job.id}`}>
                             View Details
                           </Button>
-                          {job.error_url && (
+                          {job.errorMessage && (
                             <Button size="sm" variant="outline" data-testid={`button-download-errors-${job.id}`}>
                               <Download className="w-4 h-4 mr-1" />
                               Errors
