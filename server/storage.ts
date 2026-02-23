@@ -1,44 +1,19 @@
-import { type Vendor, type InsertVendor } from "../shared/schema.js";
-import { db } from "./lib/database.js";
 import {
-  vendors, users, products, customers,
-  customerHealthProfiles, ingestionJobs, auditLog,
-  customerWhitelists, customerBlacklists, customerConsents, matchesCache,
+  type Vendor,
+  type InsertVendor,
+  vendors,
+  users,
+  products,
+  customers,
+  customerHealthProfiles,
+  ingestionJobs,
+  matchesCache,
+  type InsertCustomerHealthProfile,
 } from "../shared/schema.js";
-import { eq, and, desc, gte, lte, sql, count } from "drizzle-orm";
+import { db } from "./lib/database.js";
+import { and, desc, eq, count, sql } from "drizzle-orm";
 import { calculateHealthMetrics } from "./lib/health.js";
 
-
-
-type CreateCustomerWithHealthArgs = {
-  vendorId: string
-  userId: string | null
-  customer: {
-    fullName: string
-    email: string
-    phone?: string | null
-    customTags?: string[]
-    age?: number | null
-    gender?: any | null
-  }
-  health?: {
-    age?: number
-    gender?: any
-    activityLevel?: any
-    heightCm?: string | null    // numeric -> string
-    weightKg?: string | null    // numeric -> string
-    conditions?: string[]
-    dietGoals?: string[]
-    avoidAllergens?: string[]
-    macroTargets?: { protein_g?: number; carbs_g?: number; fat_g?: number; calories?: number }
-    bmi?: string | null         // numeric -> string
-    bmr?: string | null         // numeric -> string
-    tdeeCached?: string | null  // numeric -> string
-    derivedLimits?: any
-  } | null
-}
-
-// Drizzle-inferred types (select/insert)
 export type Product = typeof products.$inferSelect;
 export type InsertProduct = typeof products.$inferInsert;
 
@@ -51,13 +26,43 @@ export type InsertIngestionJob = typeof ingestionJobs.$inferInsert;
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
-// Small shapes used by metrics/health endpoints (match your code’s usage)
+export type CustomerHealthProfile = typeof customerHealthProfiles.$inferSelect;
+
+type CreateCustomerWithHealthArgs = {
+  vendorId: string;
+  userId: string | null;
+  customer: {
+    fullName: string;
+    email: string;
+    phone?: string | null;
+    customTags?: string[];
+    age?: number | null;
+    gender?: string | null;
+    status?: string | null;
+  };
+  health?: {
+    age?: number;
+    gender?: string;
+    activityLevel?: string;
+    heightCm?: string | null;
+    weightKg?: string | null;
+    conditions?: string[];
+    dietGoals?: string[];
+    avoidAllergens?: string[];
+    macroTargets?: Record<string, any>;
+    bmi?: string | null;
+    bmr?: string | null;
+    tdeeCached?: string | null;
+    derivedLimits?: any;
+  } | null;
+};
+
 type HealthStatus = "Healthy" | "Degraded" | "Down";
 
 export interface ReplicaStatus {
   id: string;
   status: HealthStatus;
-  lag: number;            // seconds (or whatever unit you're using)
+  lag: number;
 }
 
 export interface DatabasePartitions {
@@ -66,119 +71,127 @@ export interface DatabasePartitions {
   vendors: number;
 }
 
-// Make DatabaseHealth describe everything you actually return
 export interface DatabaseHealth {
   status: HealthStatus;
-  // keep these optional if you’re not setting them in the return
   primaryConnected?: boolean;
   readReplicaConnected?: boolean;
-
-  // the extra fields you’re returning:
   responseTime?: number;
   recentInserts?: { products: number; customers: number };
-  replicaStatus?: ReplicaStatus[];         // <-- add this
-  partitions?: DatabasePartitions;         // <-- and this
+  replicaStatus?: ReplicaStatus[];
+  partitions?: DatabasePartitions;
 }
 
 export interface SystemMetrics {
   products: number;
   customers: number;
   vendors: number;
+  pendingJobs?: number;
+  activeCustomers?: number;
+  profilesWithMatchesPct?: number;
   recentProducts?: number;
   recentCustomers?: number;
   uptime?: number;
-  /** Add this since you return `database: await this.getDatabaseHealth()` at L299 */
   database?: DatabaseHealth;
 }
 
 export interface IStorage {
-  // User management
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
-  // Vendor management
   getVendor(id: string): Promise<Vendor | undefined>;
   getVendors(): Promise<Vendor[]>;
   createVendor(vendor: InsertVendor): Promise<Vendor>;
   updateVendor(id: string, updates: Partial<InsertVendor>): Promise<Vendor | undefined>;
 
-  // Product management
   getProducts(vendorId: string, filters?: any): Promise<Product[]>;
   getProduct(id: string, vendorId: string): Promise<Product | undefined>;
   createProducts(products: InsertProduct[]): Promise<Product[]>;
   updateProduct(id: string, vendorId: string, updates: Partial<InsertProduct>): Promise<Product | undefined>;
   deleteProduct(id: string, vendorId: string): Promise<boolean>;
 
-  // Customer management
   getCustomers(vendorId: string, filters?: any): Promise<Customer[]>;
   getCustomer(id: string, vendorId: string): Promise<Customer | undefined>;
   createCustomers(customers: InsertCustomer[]): Promise<Customer[]>;
   updateCustomer(id: string, vendorId: string, updates: Partial<InsertCustomer>): Promise<Customer | undefined>;
   deleteCustomer(id: string, vendorId: string): Promise<boolean>;
-  // Return base customer merged with optional health profile (you already implement this)
   getCustomerWithProfile(id: string, vendorId?: string | null): Promise<(Customer & { healthProfile: CustomerHealthProfile | null }) | null>;
 
-  // Upsert health profile for a customer (insert if missing, else update)
-  upsertCustomerHealth(
-    customerId: string,
-    vendorId: string,
-    patch: Partial<InsertCustomerHealthProfile>
-  ): Promise<CustomerHealthProfile>;
+  upsertCustomerHealth(customerId: string, vendorId: string, patch: Partial<InsertCustomerHealthProfile>): Promise<CustomerHealthProfile>;
 
-  // Ingestion jobs
   getIngestionJob(id: string): Promise<IngestionJob | undefined>;
   getIngestionJobs(vendorId: string, status?: string): Promise<IngestionJob[]>;
   createIngestionJob(job: InsertIngestionJob): Promise<IngestionJob>;
   updateIngestionJob(id: string, updates: Partial<IngestionJob>): Promise<IngestionJob | undefined>;
 
-  // Metrics
-  getSystemMetrics(): Promise<SystemMetrics>;
+  getSystemMetrics(vendorId?: string | null): Promise<SystemMetrics>;
   getDatabaseHealth(): Promise<DatabaseHealth>;
 
-  // Search
   searchProducts(vendorId: string, query: string, filters?: any): Promise<Product[]>;
   searchCustomers(vendorId: string, query: string, filters?: any): Promise<Customer[]>;
 
-  // Matching
   getMatches(customerId: string, vendorId: string, k?: number): Promise<Product[]>;
 }
 
-export type CustomerHealthProfile = typeof customerHealthProfiles.$inferSelect;
-export type InsertCustomerHealthProfile = typeof customerHealthProfiles.$inferInsert;
-
 function genExternalId() {
-  // short, unique-enough human id: ext_kk4x8p7a
   return "ext_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+function toNumericString(v: any): string | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return String(n);
+}
+
+function toGoldCustomerStatus(status?: string | null): "active" | "inactive" | "suspended" {
+  const s = String(status || "active").toLowerCase();
+  if (s === "archived") return "inactive";
+  if (s === "inactive") return "inactive";
+  if (s === "suspended") return "suspended";
+  return "active";
+}
+
+function toGoldProductStatus(status?: string | null): "active" | "discontinued" | "out_of_stock" {
+  const s = String(status || "active").toLowerCase();
+  if (s === "inactive" || s === "discontinued") return "discontinued";
+  if (s === "out_of_stock") return "out_of_stock";
+  return "active";
+}
+
+function toGoldGender(gender?: string | null): string | null {
+  if (!gender) return null;
+  const g = String(gender).toLowerCase();
+  if (g === "unspecified") return "prefer_not_to_say";
+  if (["male", "female", "other", "prefer_not_to_say"].includes(g)) return g;
+  return "prefer_not_to_say";
+}
+
+function toGoldActivityLevel(activity?: string | null): string {
+  const a = String(activity || "sedentary").toLowerCase();
+  if (a === "light" || a === "lightly_active") return "lightly_active";
+  if (a === "moderate" || a === "moderately_active") return "moderately_active";
+  if (a === "very" || a === "very_active") return "very_active";
+  if (a === "extra" || a === "extra_active") return "extra_active";
+  return "sedentary";
+}
+
 export class DatabaseStorage implements IStorage {
-  // Feature-detection cache: whether products.notes column exists
-  private _hasProductNotes: boolean | null = null;
-  private async hasProductNotes(): Promise<boolean> {
-    if (this._hasProductNotes != null) return this._hasProductNotes;
-    try {
-      // Robust detection that works across drivers: selecting a non-existent column throws.
-      await db.execute(sql`SELECT notes FROM products LIMIT 0` as any);
-      this._hasProductNotes = true;
-    } catch {
-      this._hasProductNotes = false;
-    }
-    return this._hasProductNotes;
-  }
-  
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
     return result[0];
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    const normalized = email.trim().toLowerCase();
+    const result = await db.select().from(users).where(sql`lower(${users.email}) = ${normalized}`).limit(1);
     return result[0];
   }
 
   async createUser(user: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(user).returning();
+    const normalizedUser = { ...user, email: user.email.trim().toLowerCase() };
+    const result = await db.insert(users).values(normalizedUser).returning();
     return result[0];
   }
 
@@ -197,416 +210,531 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateVendor(id: string, updates: Partial<InsertVendor>): Promise<Vendor | undefined> {
-    const result = await db.update(vendors).set({ ...updates, updatedAt: sql`now()` }).where(eq(vendors.id, id)).returning();
+    const result = await db
+      .update(vendors)
+      .set({ ...updates, updatedAt: sql`now()` })
+      .where(eq(vendors.id, id))
+      .returning();
     return result[0];
   }
 
   async getProducts(vendorId: string, filters?: any): Promise<Product[]> {
-    // If the runtime DB is missing newly added optional columns (e.g., products.notes),
-    // fall back to a raw SELECT * so listing doesn't error.
-    if (!(await this.hasProductNotes())) {
-      const clauses: any[] = [sql`vendor_id = ${vendorId}`];
-      if (filters?.status) clauses.push(sql`status = ${filters.status}`);
-      const where = clauses.length ? sql.join(clauses, sql` AND `) : sql`TRUE`;
-      const lim = typeof filters?.limit === 'number' ? Math.max(1, filters.limit) : null;
-      const off = typeof filters?.offset === 'number' ? Math.max(0, filters.offset) : null;
-      const result: any = await db.execute(sql`
-        SELECT * FROM products WHERE ${where}
-        ${lim != null ? sql`LIMIT ${lim}` : sql``}
-        ${off != null ? sql`OFFSET ${off}` : sql``}
-      ` as any);
-      const rows = (result?.rows ?? result) as any[];
-      return rows as any as Product[];
-    }
+    const status = filters?.status ? toGoldProductStatus(filters.status) : null;
+    const pageSize = Math.min(200, Math.max(1, Number(filters?.pageSize ?? filters?.limit ?? 50) || 50));
+    const page = Math.max(1, Number(filters?.page ?? 1) || 1);
+    const offset = Number.isFinite(Number(filters?.offset))
+      ? Math.max(0, Number(filters.offset))
+      : (page - 1) * pageSize;
 
-    let q: any = db.select().from(products).where(eq(products.vendorId, vendorId));
-  
-    if (filters?.status) {
-      q = q.where(eq(products.status, filters.status as Product["status"] as any));
-    }
-    if (typeof filters?.limit === "number") {
-      q = q.limit(filters.limit as number);
-    }
-    if (typeof filters?.offset === "number") {
-      q = q.offset(filters.offset as number);
-    }
-  
-    const rows = (await q) as Product[];
-    return rows;
+    const where: any[] = [sql`vendor_id = ${vendorId}`];
+    if (status) where.push(sql`status = ${status}`);
+
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        name,
+        brand,
+        description,
+        category_id AS "categoryId",
+        barcode,
+        gtin_type AS "gtinType",
+        price,
+        currency,
+        serving_size AS "servingSize",
+        package_weight AS "packageWeight",
+        product_url AS "sourceUrl",
+        notes,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM gold.products
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY updated_at DESC
+      LIMIT ${pageSize}
+      OFFSET ${offset}
+    `);
+
+    return (out.rows || []) as Product[];
   }
-  
 
   async getProduct(id: string, vendorId: string): Promise<Product | undefined> {
-    if (!(await this.hasProductNotes())) {
-      const result: any = await db.execute(sql`
-        SELECT * FROM products WHERE id = ${id} AND vendor_id = ${vendorId} LIMIT 1
-      ` as any);
-      const rows = (result?.rows ?? result) as any[];
-      return rows?.[0] as any as Product | undefined;
-    }
-    const result = await db
-      .select()
-      .from(products)
-      .where(and(eq(products.id, id), eq(products.vendorId, vendorId)))
-      .limit(1);
-    return result[0];
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        name,
+        brand,
+        description,
+        category_id AS "categoryId",
+        barcode,
+        gtin_type AS "gtinType",
+        price,
+        currency,
+        serving_size AS "servingSize",
+        package_weight AS "packageWeight",
+        product_url AS "sourceUrl",
+        notes,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM gold.products
+      WHERE id = ${id} AND vendor_id = ${vendorId}
+      LIMIT 1
+    `);
+    return (out.rows?.[0] as Product | undefined) ?? undefined;
   }
 
   async createProducts(productList: InsertProduct[]): Promise<Product[]> {
     if (productList.length === 0) return [];
-    return await db.insert(products).values(productList).returning();
+    const created: Product[] = [];
+
+    for (const p of productList) {
+      const out = await db.execute(sql`
+        INSERT INTO gold.products (
+          vendor_id,
+          external_id,
+          name,
+          brand,
+          description,
+          category_id,
+          barcode,
+          gtin_type,
+          price,
+          currency,
+          serving_size,
+          package_weight,
+          product_url,
+          notes,
+          status
+        )
+        VALUES (
+          ${p.vendorId},
+          ${p.externalId},
+          ${p.name},
+          ${p.brand ?? null},
+          ${p.description ?? null},
+          ${p.categoryId ?? null},
+          ${p.barcode ?? null},
+          ${p.gtinType ?? null},
+          ${p.price ?? null},
+          ${p.currency ?? "USD"},
+          ${p.servingSize ?? null},
+          ${p.packageWeight ?? null},
+          ${p.sourceUrl ?? null},
+          ${p.notes ?? null},
+          ${toGoldProductStatus(p.status as any)}
+        )
+        RETURNING
+          id,
+          vendor_id AS "vendorId",
+          external_id AS "externalId",
+          name,
+          brand,
+          description,
+          category_id AS "categoryId",
+          barcode,
+          gtin_type AS "gtinType",
+          price,
+          currency,
+          serving_size AS "servingSize",
+          package_weight AS "packageWeight",
+          product_url AS "sourceUrl",
+          notes,
+          status,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+      `);
+      if (out.rows?.[0]) created.push(out.rows[0] as Product);
+    }
+
+    return created;
   }
 
   async updateProduct(id: string, vendorId: string, updates: Partial<InsertProduct>): Promise<Product | undefined> {
-    // Avoid referencing a missing column on older DBs
-    if (!(await this.hasProductNotes())) {
-      if ((updates as any).notes !== undefined) delete (updates as any).notes;
-    }
-    const result = await db
-      .update(products)
-      .set({ ...updates, updatedAt: sql`now()` })
-      .where(and(eq(products.id, id), eq(products.vendorId, vendorId)))
-      .returning();
-    return result[0];
+    const setParts: any[] = [];
+    if (updates.externalId !== undefined) setParts.push(sql`external_id = ${updates.externalId}`);
+    if (updates.name !== undefined) setParts.push(sql`name = ${updates.name}`);
+    if (updates.brand !== undefined) setParts.push(sql`brand = ${updates.brand}`);
+    if (updates.description !== undefined) setParts.push(sql`description = ${updates.description}`);
+    if (updates.categoryId !== undefined) setParts.push(sql`category_id = ${updates.categoryId}`);
+    if (updates.barcode !== undefined) setParts.push(sql`barcode = ${updates.barcode}`);
+    if (updates.gtinType !== undefined) setParts.push(sql`gtin_type = ${updates.gtinType}`);
+    if (updates.price !== undefined) setParts.push(sql`price = ${updates.price}`);
+    if (updates.currency !== undefined) setParts.push(sql`currency = ${updates.currency}`);
+    if (updates.servingSize !== undefined) setParts.push(sql`serving_size = ${updates.servingSize}`);
+    if (updates.packageWeight !== undefined) setParts.push(sql`package_weight = ${updates.packageWeight}`);
+    if (updates.sourceUrl !== undefined) setParts.push(sql`product_url = ${updates.sourceUrl}`);
+    if (updates.notes !== undefined) setParts.push(sql`notes = ${updates.notes}`);
+    if (updates.status !== undefined) setParts.push(sql`status = ${toGoldProductStatus(updates.status as any)}`);
+    setParts.push(sql`updated_at = now()`);
+
+    const out = await db.execute(sql`
+      UPDATE gold.products
+      SET ${sql.join(setParts, sql`, `)}
+      WHERE id = ${id} AND vendor_id = ${vendorId}
+      RETURNING
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        name,
+        brand,
+        description,
+        category_id AS "categoryId",
+        barcode,
+        gtin_type AS "gtinType",
+        price,
+        currency,
+        serving_size AS "servingSize",
+        package_weight AS "packageWeight",
+        product_url AS "sourceUrl",
+        notes,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `);
+    return (out.rows?.[0] as Product | undefined) ?? undefined;
   }
 
   async deleteProduct(id: string, vendorId: string): Promise<boolean> {
     const result = await db
       .delete(products)
       .where(and(eq(products.id, id), eq(products.vendorId, vendorId)))
-      .returning();
+      .returning({ id: products.id });
     return result.length > 0;
   }
 
-  // ✅ UPDATED: honors `q`/`search` and preserves vendor scoping; supports limit/page if provided
   async getCustomers(vendorId: string, filters?: any): Promise<Customer[]> {
-    let q: any = db.select().from(customers);
-  
-    if (filters?.status) {
-      let q: any = db.select().from(customers).where(eq(customers.vendorId, vendorId));
-    }
-    const lim = typeof filters?.limit === "number" ? filters.limit : undefined;
-    const page = typeof filters?.page === "number" ? filters.page : undefined;
-  
-    if (lim) q = q.limit(lim);
-    if (page && lim) q = q.offset((page - 1) * lim);
-  
-    const rows = (await q) as Customer[];
-    return rows;
-  }
-  
-  async upsertCustomerHealth(
-    customerId: string,
-    vendorId: string,
-    patch: Partial<InsertCustomerHealthProfile>
-  ): Promise<CustomerHealthProfile> {
-    // Make sure this customer belongs to the vendor
-    const [cust] = await db
-      .select({ id: customers.id, age: customers.age, gender: customers.gender })
-      .from(customers)
-      .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
-      .limit(1);
-    if (!cust) throw new Error("Customer not found");
-  
-    const now = sql`now()`;
-    const have = (v: any) =>
-      v !== undefined && v !== null && v !== "" && !Number.isNaN(Number(v));
-    
-    if (have((patch as any).heightCm) && have((patch as any).weightKg) && have((patch as any).age)) {
-      const metrics = calculateHealthMetrics({
-        heightCm: Number((patch as any).heightCm),
-        weightKg: Number((patch as any).weightKg),
-        age: Number((patch as any).age),
-        gender: (patch as any).gender ?? (cust.gender as any) ?? "unspecified",
-        activityLevel: (patch as any).activityLevel ?? "sedentary",
-        conditions: (patch as any).conditions ?? [],
-        dietGoals: (patch as any).dietGoals ?? [],
-        avoidAllergens: (patch as any).avoidAllergens ?? [],
-        macroTargets: (patch as any).macroTargets,
-      });
-    
-      // Leave them as numbers here; they'll be string-coerced in normalizedPatch below
-      (patch as any).bmi = metrics.bmi;
-      (patch as any).bmr = metrics.bmr;
-      (patch as any).tdeeCached = metrics.tdee;
-      (patch as any).derivedLimits = metrics.derivedLimits ?? null;
-    }
-    // Drizzle maps PG numeric -> TS string. Coerce any numbers to strings.
-    const toStr = (v: any) =>
-      v === undefined ? undefined : v === null ? null : typeof v === "number" ? String(v) : String(v);
-  
-    // Only the NUMERIC columns need string coercion.
-    const normalizedPatch: Partial<InsertCustomerHealthProfile> = {
-      ...patch,
-      // numeric (NOT NULL)
-      heightCm: (patch as any).heightCm !== undefined ? toStr((patch as any).heightCm) : patch.heightCm,
-      weightKg: (patch as any).weightKg !== undefined ? toStr((patch as any).weightKg) : patch.weightKg,
-      // numeric (nullable)
-      bmi: (patch as any).bmi !== undefined ? toStr((patch as any).bmi) : patch.bmi ?? null,
-      bmr: (patch as any).bmr !== undefined ? toStr((patch as any).bmr) : patch.bmr ?? null,
-      tdeeCached:
-        (patch as any).tdeeCached !== undefined ? toStr((patch as any).tdeeCached) : patch.tdeeCached ?? null,
-    };
-  
-    // 1) UPDATE first
-    const [updated] = await db
-      .update(customerHealthProfiles)
-      .set({ ...normalizedPatch, updatedAt: now })
-      .where(eq(customerHealthProfiles.customerId, customerId))
-      .returning();
-    if (updated) return updated;
-  
-    // 2) INSERT with safe defaults for NOT NULL columns
-    const defaults: InsertCustomerHealthProfile = {
-      customerId,
-      // heightCm/weightKg are NUMERIC NOT NULL -> strings
-      heightCm: "0",
-      weightKg: "0",
-      // age is int4 (number)
-      age: cust.age ?? 0,
-      // enums
-      gender: (cust.gender as any) ?? "female",
-      activityLevel: "extra" as any,
-      // arrays/jsonb
-      conditions: [],
-      dietGoals: [],
-      macroTargets: { protein_g: 0, carbs_g: 0, fat_g: 0, calories: 0 },
-      avoidAllergens: [],
-      // other numeric (nullable) -> strings or null
-      bmi: null,
-      bmr: null,
-      tdeeCached: null,
-      derivedLimits: null,
-      // audit
-      createdAt: now as any,
-      updatedAt: now as any,
-      updatedBy: null,
-    };
-  
-    const values: InsertCustomerHealthProfile = {
-      ...defaults,
-      ...normalizedPatch,
-      customerId,
-      updatedAt: now as any,
-    };
-  
-    const [inserted] = await db
-      .insert(customerHealthProfiles)
-      .values(values)
-      .returning();
-    return inserted;
+    const status = filters?.status ? toGoldCustomerStatus(filters.status) : null;
+    const pageSize = Math.min(200, Math.max(1, Number(filters?.pageSize ?? filters?.limit ?? 50) || 50));
+    const page = Math.max(1, Number(filters?.page ?? 1) || 1);
+    const offset = Number.isFinite(Number(filters?.offset))
+      ? Math.max(0, Number(filters.offset))
+      : (page - 1) * pageSize;
 
+    const where: any[] = [sql`vendor_id = ${vendorId}`];
+    if (status) where.push(sql`account_status = ${status}`);
+
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        global_customer_id AS "globalCustomerId",
+        email,
+        full_name AS "fullName",
+        first_name AS "firstName",
+        last_name AS "lastName",
+        date_of_birth AS "dob",
+        age,
+        gender,
+        phone,
+        location_country AS "locationCountry",
+        location_region AS "locationRegion",
+        location_city AS "locationCity",
+        location_postal_code AS "locationPostalCode",
+        account_status AS "accountStatus",
+        source_system AS "sourceSystem",
+        notes,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        ARRAY[]::text[] AS "customTags"
+      FROM gold.b2b_customers
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY updated_at DESC
+      LIMIT ${pageSize}
+      OFFSET ${offset}
+    `);
+
+    return (out.rows || []) as Customer[];
   }
 
-  async createCustomerWithHealth(args: CreateCustomerWithHealthArgs) {
-    const { vendorId, userId, customer, health } = args
-    // inside createCustomerWithHealth(...)
-    return await db.transaction(async (tx) => {
-      const now = sql`now()`;
-
-      // 1) customers: UPSERT by (vendor_id, email)
-      const [cust] = await tx
-        .insert(customers)
-        .values({
-          id: crypto.randomUUID(),
-          vendorId,
-          externalId: genExternalId(),
-          fullName: customer.fullName,
-          email: customer.email,
-          phone: customer.phone ?? null,
-          customTags: customer.customTags ?? [],
-          age: customer.age ?? null,
-          gender: customer.gender ?? "unspecified",
-          createdAt: now as any,
-          updatedAt: now as any,
-          updatedBy: userId,
-        })
-        .onConflictDoUpdate({
-          target: [customers.vendorId, customers.email],   // ← key for idempotency
-          set: {
-            fullName: sql`excluded.full_name`,
-            phone: sql`excluded.phone`,
-            customTags: sql`excluded.custom_tags`,
-            age: sql`excluded.age`,
-            gender: sql`excluded.gender`,
-            updatedAt: now as any,
-            updatedBy: userId,
-          },
-        })
-        .returning();
-
-      // 2) customer_health_profiles: insert-or-ignore (one profile per customer)
-      let healthRow: any = null;
-      if (health) {
-        // ... your existing derived-metrics block stays the same ...
-
-        const defaults = {
-          customerId: cust.id,
-          heightCm: health.heightCm ?? "0",
-          weightKg: health.weightKg ?? "0",
-          age: health.age ?? 0,
-          gender: health.gender ?? "unspecified",
-          activityLevel: health.activityLevel ?? "sedentary",
-          conditions: health.conditions ?? [],
-          dietGoals: health.dietGoals ?? [],
-          macroTargets: health.macroTargets ?? { protein_g: 0, carbs_g: 0, fat_g: 0, calories: 0 },
-          avoidAllergens: health.avoidAllergens ?? [],
-          bmi: health.bmi ?? null,
-          bmr: health.bmr ?? null,
-          tdeeCached: health.tdeeCached ?? null,
-          derivedLimits: health.derivedLimits ?? null,
-          createdAt: now as any,
-          updatedAt: now as any,
-          updatedBy: userId,
-        };
-
-        const [ins] = await tx
-          .insert(customerHealthProfiles)
-          .values(defaults)
-          .onConflictDoNothing({ target: customerHealthProfiles.customerId }) // ← ignore if exists
-          .returning();
-
-        healthRow = ins ?? null;
-      }
-
-      return { customer: cust, health: healthRow };
-    });
+  async getCustomer(id: string, vendorId: string): Promise<Customer | undefined> {
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        global_customer_id AS "globalCustomerId",
+        email,
+        full_name AS "fullName",
+        first_name AS "firstName",
+        last_name AS "lastName",
+        date_of_birth AS "dob",
+        age,
+        gender,
+        phone,
+        location_country AS "locationCountry",
+        location_region AS "locationRegion",
+        location_city AS "locationCity",
+        location_postal_code AS "locationPostalCode",
+        account_status AS "accountStatus",
+        source_system AS "sourceSystem",
+        notes,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        ARRAY[]::text[] AS "customTags"
+      FROM gold.b2b_customers
+      WHERE id = ${id} AND vendor_id = ${vendorId}
+      LIMIT 1
+    `);
+    return (out.rows?.[0] as Customer | undefined) ?? undefined;
   }
 
-  async getCustomer(id: string, vendorId: string) {  // lines ~165–172
-    const result = await db
-      .select()
-      .from(customers)
-      .where(and(eq(customers.id, id), eq(customers.vendorId, vendorId)))
-      .limit(1);
-    return result[0];
-
-  }
-  
   async getCustomerWithProfile(id: string, vendorId?: string | null) {
-    // Build WHERE in the same style as your other methods
     const where = vendorId
       ? and(eq(customers.id, id), eq(customers.vendorId, vendorId))
       : eq(customers.id, id);
-  
+
     const rows = await db
       .select({
-        c: customers,
-        hp: customerHealthProfiles, // full row; trim here if you want fewer fields
+        customer: customers,
+        health: customerHealthProfiles,
       })
       .from(customers)
       .leftJoin(customerHealthProfiles, eq(customerHealthProfiles.customerId, customers.id))
       .where(where)
       .limit(1);
-  
+
     if (!rows.length) return null;
-  
-    const { c, hp } = rows[0];
-  
-    // Return a merged object; keep the base customer shape untouched
     return {
-      ...c,
-      healthProfile: hp
-        ? {
-            // Map only what you want to expose. Field names below mirror your Supabase schema.
-            customerId: hp.customerId,
-            heightCm: hp.heightCm,
-            weightKg: hp.weightKg,
-            age: hp.age,
-            gender: hp.gender,
-            activityLevel: hp.activityLevel,
-            conditions: hp.conditions,            // text[]
-            dietGoals: hp.dietGoals,              // text[]
-            macroTargets: hp.macroTargets,        // jsonb
-            avoidAllergens: hp.avoidAllergens,    // text[]
-            bmi: hp.bmi,
-            bmr: hp.bmr,
-            tdeeCached: hp.tdeeCached,
-            derivedLimits: hp.derivedLimits,      // jsonb
-            createdAt: hp.createdAt,
-            updatedAt: hp.updatedAt,
-            updatedBy: hp.updatedBy,
-          }
-        : null,
+      ...rows[0].customer,
+      healthProfile: rows[0].health ?? null,
     };
   }
 
   async createCustomers(customerList: InsertCustomer[]): Promise<Customer[]> {
     if (customerList.length === 0) return [];
-  
-    // NOTE: keep shape identical; just make the insert idempotent
-    const rows = await db
-      .insert(customers)
-      .values(customerList)
-      .onConflictDoNothing({
-        // treat (vendor_id, email) as the natural key
-        target: [customers.vendorId, customers.email],
-      })
-      .returning();
-  
-    return rows;
+    return await db.insert(customers).values(customerList).returning();
   }
 
-  async updateCustomer(id: string, vendorId: string, updates: any) {
-    // Build an allow-list (camelCase keys that match Drizzle columns)
-    const allowed: any = {};
-    if (updates.fullName !== undefined) allowed.fullName = String(updates.fullName).trim();
-    if (updates.email !== undefined) allowed.email = String(updates.email).trim();
-    if (updates.phone !== undefined) allowed.phone = String(updates.phone).trim();
-    if (updates.customTags !== undefined) allowed.customTags = updates.customTags; // string[] | null
-    if (updates.notes !== undefined) allowed.notes = updates.notes; // free-form text
-    if (updates.updatedBy !== undefined) allowed.updatedBy = updates.updatedBy;
-  
-    // Nothing to update? Return current row to satisfy the interface type.
-    if (Object.keys(allowed).length === 0) {
-      return await this.getCustomer(id, vendorId);
-    }
-  
-    // 🔎 High-signal debug
-    console.log('[storage.updateCustomer] allowed ->', allowed);
-  
-    // Ensure at top of file: import { and, eq, sql } from "drizzle-orm";
-    await db
+  async updateCustomer(id: string, vendorId: string, updates: Partial<InsertCustomer>): Promise<Customer | undefined> {
+    const result = await db
       .update(customers)
-      .set({ ...allowed, updatedAt: sql`now()` })
-      .where(and(eq(customers.id, id), eq(customers.vendorId, vendorId)));
-  
-    // IMPORTANT: return the **full base** customer to match IStorage
-    const row = await this.getCustomer(id, vendorId);
-  
-    // 🔎 Debug the value after UPDATE
-    if (row) console.log('[storage.updateCustomer] post-fetch fullName ->', row.fullName);
-  
-    return row; // type: Customer | undefined (matches IStorage)
+      .set({ ...updates, updatedAt: sql`now()` })
+      .where(and(eq(customers.id, id), eq(customers.vendorId, vendorId)))
+      .returning();
+    return result[0];
   }
 
-  // Upsert a customer-product note
+  async upsertCustomerHealth(
+    customerId: string,
+    vendorId: string,
+    patch: Partial<InsertCustomerHealthProfile>
+  ): Promise<CustomerHealthProfile> {
+    const [cust] = await db
+      .select({ id: customers.id, age: customers.age, gender: customers.gender })
+      .from(customers)
+      .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
+      .limit(1);
+
+    if (!cust) throw new Error("Customer not found");
+
+    const normalizedPatch: Partial<InsertCustomerHealthProfile> = {
+      ...patch,
+      activityLevel: toGoldActivityLevel((patch as any).activityLevel as string | null),
+      age: (patch as any).age ?? cust.age ?? undefined,
+      gender: toGoldGender((patch as any).gender ?? cust.gender ?? null),
+      heightCm: toNumericString((patch as any).heightCm),
+      weightKg: toNumericString((patch as any).weightKg),
+      bmi: toNumericString((patch as any).bmi),
+      bmr: toNumericString((patch as any).bmr),
+      tdeeCached: toNumericString((patch as any).tdeeCached),
+      conditions: Array.isArray((patch as any).conditions) ? (patch as any).conditions : undefined,
+      dietGoals: Array.isArray((patch as any).dietGoals) ? (patch as any).dietGoals : undefined,
+      avoidAllergens: Array.isArray((patch as any).avoidAllergens) ? (patch as any).avoidAllergens : undefined,
+      macroTargets: (patch as any).macroTargets ?? undefined,
+      derivedLimits: (patch as any).derivedLimits ?? undefined,
+    };
+
+    // Merge with existing profile so partial updates still recompute BMI/TDEE
+    const [existingProfile] = await db.select()
+      .from(customerHealthProfiles)
+      .where(eq(customerHealthProfiles.customerId, customerId))
+      .limit(1);
+
+    const effectiveHeight = normalizedPatch.heightCm ?? existingProfile?.heightCm ?? null;
+    const effectiveWeight = normalizedPatch.weightKg ?? existingProfile?.weightKg ?? null;
+    const effectiveAge = normalizedPatch.age ?? existingProfile?.age ?? cust.age ?? null;
+
+    const haveMetricsInputs =
+      effectiveHeight != null &&
+      effectiveWeight != null &&
+      effectiveAge != null;
+
+    if (haveMetricsInputs) {
+      const metrics = calculateHealthMetrics({
+        heightCm: String(effectiveHeight),
+        weightKg: String(effectiveWeight),
+        age: Number(effectiveAge),
+        gender: (normalizedPatch.gender as any) ?? existingProfile?.gender ?? "prefer_not_to_say",
+        activityLevel: normalizedPatch.activityLevel ?? existingProfile?.activityLevel ?? "sedentary",
+        conditions: normalizedPatch.conditions ?? existingProfile?.conditions ?? [],
+        dietGoals: normalizedPatch.dietGoals ?? existingProfile?.dietGoals ?? [],
+        avoidAllergens: normalizedPatch.avoidAllergens ?? existingProfile?.avoidAllergens ?? [],
+        macroTargets: (normalizedPatch.macroTargets as any) ?? (existingProfile?.macroTargets as any) ?? {},
+      } as any);
+
+      normalizedPatch.bmi = String(metrics.bmi);
+      normalizedPatch.bmr = String(metrics.bmr);
+      normalizedPatch.tdeeCached = String(metrics.tdee);
+      normalizedPatch.derivedLimits = metrics.derivedLimits;
+    }
+
+    const [updated] = await db
+      .update(customerHealthProfiles)
+      .set({ ...normalizedPatch, updatedAt: sql`now()` })
+      .where(eq(customerHealthProfiles.customerId, customerId))
+      .returning();
+
+    if (updated) return updated;
+
+    const defaults: InsertCustomerHealthProfile = {
+      customerId,
+      heightCm: "0",
+      weightKg: "0",
+      activityLevel: "sedentary",
+      age: cust.age ?? 0,
+      gender: toGoldGender(cust.gender) ?? "prefer_not_to_say",
+      conditions: [],
+      dietGoals: [],
+      macroTargets: {},
+      avoidAllergens: [],
+      bmi: null,
+      bmr: null,
+      tdeeCached: null,
+      derivedLimits: {},
+      updatedBy: null,
+      healthGoal: null,
+      targetWeightKg: null,
+      targetCalories: null,
+      targetProteinG: null,
+      targetCarbsG: null,
+      targetFatG: null,
+      targetFiberG: null,
+      targetSodiumMg: null,
+      targetSugarG: null,
+      tdee: null,
+    };
+
+    const [inserted] = await db
+      .insert(customerHealthProfiles)
+      .values({ ...defaults, ...normalizedPatch, customerId })
+      .returning();
+
+    return inserted;
+  }
+
+  async createCustomerWithHealth(args: CreateCustomerWithHealthArgs) {
+    const { vendorId, userId, customer, health } = args;
+
+    const baseCustomer = await db.transaction(async (tx) => {
+      const existing = await tx
+        .select({ id: customers.id })
+        .from(customers)
+        .where(and(eq(customers.vendorId, vendorId), sql`lower(${customers.email}) = ${customer.email.trim().toLowerCase()}`))
+        .limit(1);
+
+      let row: Customer;
+      if (existing[0]?.id) {
+        const [updated] = await tx
+          .update(customers)
+          .set({
+            fullName: customer.fullName,
+            phone: customer.phone ?? null,
+            customTags: customer.customTags ?? [],
+            age: customer.age ?? null,
+            gender: toGoldGender(customer.gender) ?? null,
+            accountStatus: toGoldCustomerStatus(customer.status),
+            updatedBy: userId,
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(customers.id, existing[0].id), eq(customers.vendorId, vendorId)))
+          .returning();
+
+        row = updated;
+      } else {
+        const [created] = await tx
+          .insert(customers)
+          .values({
+            vendorId,
+            externalId: genExternalId(),
+            fullName: customer.fullName,
+            email: customer.email,
+            phone: customer.phone ?? null,
+            customTags: customer.customTags ?? [],
+            age: customer.age ?? null,
+            gender: toGoldGender(customer.gender) ?? null,
+            accountStatus: toGoldCustomerStatus(customer.status),
+            createdBy: userId,
+            updatedBy: userId,
+          })
+          .returning();
+
+        row = created;
+      }
+
+      return row;
+    });
+
+    let healthRow: CustomerHealthProfile | null = null;
+    if (health) {
+      healthRow = await this.upsertCustomerHealth(baseCustomer.id, vendorId, {
+        age: health.age,
+        gender: health.gender,
+        activityLevel: health.activityLevel,
+        heightCm: health.heightCm,
+        weightKg: health.weightKg,
+        conditions: health.conditions ?? [],
+        dietGoals: health.dietGoals ?? [],
+        avoidAllergens: health.avoidAllergens ?? [],
+        macroTargets: health.macroTargets ?? {},
+        bmi: health.bmi,
+        bmr: health.bmr,
+        tdeeCached: health.tdeeCached,
+        derivedLimits: health.derivedLimits ?? {},
+        updatedBy: userId,
+      });
+    }
+
+    return { customer: baseCustomer, health: healthRow };
+  }
+
   async upsertCustomerProductNote(
     vendorId: string,
     customerId: string,
     productId: string,
     note: string | null,
-    userId: string | null,
+    userId: string | null
   ) {
-    const now = sql`now()`;
-    // Load current map
     const [row] = await db
       .select({ productNotes: customers.productNotes })
       .from(customers)
       .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
       .limit(1);
+
     if (!row) throw new Error("Customer not found");
 
     const map: Record<string, any> = (row.productNotes as any) || {};
-    if (note == null || note === "") delete map[productId]; else map[productId] = String(note);
+    if (note == null || note === "") {
+      delete map[productId];
+    } else {
+      map[productId] = String(note);
+    }
 
     const [updated] = await db
       .update(customers)
-      .set({ productNotes: map as any, updatedAt: now as any, updatedBy: userId as any })
+      .set({ productNotes: map as any, updatedAt: sql`now()`, updatedBy: userId as any })
       .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
       .returning({ productNotes: customers.productNotes });
 
-    return { customerId, productId, note: (updated?.productNotes as any)?.[productId] ?? null } as any;
+    return {
+      customerId,
+      productId,
+      note: (updated?.productNotes as any)?.[productId] ?? null,
+    };
   }
 
   async getCustomerProductNote(customerId: string, productId: string) {
@@ -615,27 +743,25 @@ export class DatabaseStorage implements IStorage {
       .from(customers)
       .where(eq(customers.id, customerId))
       .limit(1);
+
     const map: Record<string, any> = (row?.productNotes as any) || {};
-    return { customerId, productId, note: map[productId] ?? null } as any;
+    return { customerId, productId, note: map[productId] ?? null };
   }
 
   async deleteCustomer(id: string, vendorId: string): Promise<boolean> {
     let deleted = false;
     await db.transaction(async (tx) => {
-      // Delete dependents first (FKs reference customers.id)
       await tx.delete(customerHealthProfiles).where(eq(customerHealthProfiles.customerId, id));
-      await tx.delete(customerConsents).where(eq(customerConsents.customerId, id));
-      await tx.delete(customerWhitelists).where(eq(customerWhitelists.customerId, id));
-      await tx.delete(customerBlacklists).where(eq(customerBlacklists.customerId, id));
       await tx.delete(matchesCache).where(and(eq(matchesCache.vendorId, vendorId), eq(matchesCache.customerId, id)));
-  
-      const res = await tx
+
+      const result = await tx
         .delete(customers)
         .where(and(eq(customers.id, id), eq(customers.vendorId, vendorId)))
         .returning({ id: customers.id });
-  
-      deleted = res.length > 0;
+
+      deleted = result.length > 0;
     });
+
     return deleted;
   }
 
@@ -646,15 +772,9 @@ export class DatabaseStorage implements IStorage {
 
   async getIngestionJobs(vendorId: string, status?: string): Promise<IngestionJob[]> {
     let q: any = db.select().from(ingestionJobs).where(eq(ingestionJobs.vendorId, vendorId));
-  
-    if (status) {
-      const s = status as IngestionJob["status"] as any; // 'queued'|'running'|'failed'|'completed'|'canceled'
-      q = q.where(eq(ingestionJobs.status, s));
-    }
-  
-    return (await q) as IngestionJob[];
+    if (status) q = q.where(eq(ingestionJobs.status, status));
+    return (await q.orderBy(desc(ingestionJobs.createdAt))) as IngestionJob[];
   }
-  
 
   async createIngestionJob(job: InsertIngestionJob): Promise<IngestionJob> {
     const result = await db.insert(ingestionJobs).values(job).returning();
@@ -662,118 +782,207 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateIngestionJob(id: string, updates: Partial<IngestionJob>): Promise<IngestionJob | undefined> {
-    const result = await db.update(ingestionJobs).set({ ...updates }).where(eq(ingestionJobs.id, id)).returning();
+    const result = await db.update(ingestionJobs).set(updates).where(eq(ingestionJobs.id, id)).returning();
     return result[0];
   }
 
-  async getSystemMetrics(): Promise<SystemMetrics> {
-    const vendorCountRes = await db.select({ count: count() }).from(vendors);
-    const productCountRes = await db.select({ count: count() }).from(products);
-    const customerCountRes = await db.select({ count: count() }).from(customers);
+  async getSystemMetrics(vendorId?: string | null): Promise<SystemMetrics> {
+    if (!vendorId) {
+      return {
+        vendors: 0,
+        products: 0,
+        customers: 0,
+        pendingJobs: 0,
+        activeCustomers: 0,
+        profilesWithMatchesPct: 0,
+        database: await this.getDatabaseHealth(),
+      };
+    }
+
+    const safeCount = async (query: any, missingTableDefault = 0): Promise<number> => {
+      try {
+        const r = await db.execute(query);
+        return Number(r.rows?.[0]?.c ?? 0);
+      } catch (e: any) {
+        if (e?.code === "42P01") return missingTableDefault;
+        throw e;
+      }
+    };
+
+    const productsCount = await safeCount(
+      sql`SELECT count(*)::int AS c FROM gold.products WHERE vendor_id = ${vendorId}`
+    );
+    const activeCustomers = await safeCount(
+      sql`SELECT count(*)::int AS c FROM gold.b2b_customers WHERE vendor_id = ${vendorId} AND account_status = 'active'`
+    );
+    const totalCustomers = await safeCount(
+      sql`SELECT count(*)::int AS c FROM gold.b2b_customers WHERE vendor_id = ${vendorId}`
+    );
+    const pendingJobs = await safeCount(
+      sql`SELECT count(*)::int AS c FROM public.ingestion_jobs WHERE vendor_id = ${vendorId} AND status IN ('queued','pending','processing','running')`
+    );
+    const vendorCount = await safeCount(
+      sql`SELECT count(*)::int AS c FROM gold.vendors WHERE id = ${vendorId}`
+    );
+    const matchedCustomers = await safeCount(
+      sql`SELECT count(DISTINCT customer_id)::int AS c FROM public.matches_cache WHERE vendor_id = ${vendorId}`
+    );
+    const profilesWithMatchesPct = totalCustomers > 0 ? (matchedCustomers * 100) / totalCustomers : 0;
 
     return {
-      vendors: vendorCountRes[0].count,
-      products: productCountRes[0].count,
-      customers: customerCountRes[0].count,
+      vendors: vendorCount,
+      products: productsCount,
+      customers: totalCustomers,
+      pendingJobs,
+      activeCustomers,
+      profilesWithMatchesPct,
       database: await this.getDatabaseHealth(),
     };
   }
 
   async getDatabaseHealth(): Promise<DatabaseHealth> {
-    const now = new Date();
-    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-
-    const recentProducts = await db.select({ count: count() })
-      .from(products)
-      .where(and(gte(products.createdAt, sql`now() - interval '1 hour'`), lte(products.createdAt, sql`now()`)));
-
-    const recentCustomers = await db.select({ count: count() })
-      .from(customers)
-      .where(and(gte(customers.createdAt,  sql`now() - interval '1 hour'`), lte(customers.createdAt, sql`now()`)));
-
     return {
-      status: 'Healthy',
-      responseTime: Math.random() * 100 + 20,
-      recentInserts: {
-        products: recentProducts[0].count,
-        customers: recentCustomers[0].count
-      },
-      replicaStatus: [
-        { id: 'replica-1', status: 'Healthy', lag: 0.8 },
-        { id: 'replica-2', status: 'Healthy', lag: 1.2 }
-      ],
-      partitions: {
-        products: 752,
-        customers: 1504,
-        vendors: 47
-      }
+      status: "Healthy",
+      responseTime: 25,
+      recentInserts: { products: 0, customers: 0 },
+      replicaStatus: [{ id: "primary", status: "Healthy", lag: 0 }],
+      partitions: { products: 0, customers: 0, vendors: 0 },
     };
   }
 
-  // ✅ UPDATED: robust vendor-scoped product search with combined conditions
   async searchProducts(vendorId: string, query: string, filters?: any): Promise<Product[]> {
-    const f = filters || {};
-    const conditions: any[] = [eq(products.vendorId, vendorId)];
-    const q = (query ?? f.q ?? f.search ?? "").toString().trim();
+    const q = String(query || filters?.q || "").trim();
+    const like = `%${q}%`;
+    const status = filters?.status ? toGoldProductStatus(filters.status) : null;
+    const pageSize = Math.min(200, Math.max(1, Number(filters?.pageSize ?? filters?.limit ?? 50) || 50));
+    const page = Math.max(1, Number(filters?.page ?? 1) || 1);
+    const offset = Number.isFinite(Number(filters?.offset))
+      ? Math.max(0, Number(filters.offset))
+      : (page - 1) * pageSize;
+
+    const where: any[] = [sql`vendor_id = ${vendorId}`];
     if (q) {
-      const like = `%${q}%`;
-      conditions.push(sql`(
-        ${products.name} ILIKE ${like} OR
-        ${products.brand} ILIKE ${like} OR
-        ${products.barcode} ILIKE ${like} OR
-        ${products.description} ILIKE ${like}
+      where.push(sql`(
+        name ILIKE ${like}
+        OR COALESCE(brand, '') ILIKE ${like}
+        OR COALESCE(description, '') ILIKE ${like}
+        OR COALESCE(external_id, '') ILIKE ${like}
       )`);
     }
-    if (f.brand) {
-      conditions.push(sql`${products.brand} ILIKE ${`%${f.brand}%`}`);
-    }
-    const categoryId = f.category_id ?? f.categoryId;
-    if (categoryId) {
-      conditions.push(eq(products.categoryId, categoryId));
-    }
-    if (f.status) {
-      conditions.push(eq(products.status, f.status));
-    }
-    let dbQuery: any = db.select().from(products).where(and(...conditions));
-    if (f.limit) {
-      const lim = Math.min(200, Math.max(1, parseInt(String(f.limit), 10)));
-      dbQuery = dbQuery.limit(lim);
-    }
-    return await dbQuery.orderBy(desc(products.updatedAt));
+    if (filters?.brand) where.push(sql`brand ILIKE ${`%${filters.brand}%`}`);
+    if (filters?.categoryId) where.push(sql`category_id = ${filters.categoryId}`);
+    if (status) where.push(sql`status = ${status}`);
+
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        name,
+        brand,
+        description,
+        category_id AS "categoryId",
+        barcode,
+        gtin_type AS "gtinType",
+        price,
+        currency,
+        serving_size AS "servingSize",
+        package_weight AS "packageWeight",
+        product_url AS "sourceUrl",
+        notes,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM gold.products
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY updated_at DESC
+      LIMIT ${pageSize}
+      OFFSET ${offset}
+    `);
+    return (out.rows || []) as Product[];
   }
 
-  // ✅ UPDATED: vendor-scoped customers search (same pattern as products)
   async searchCustomers(vendorId: string, query: string, filters?: any): Promise<Customer[]> {
-    const f = filters || {};
-    const conditions: any[] = [eq(customers.vendorId, vendorId)];
-    const q = (query ?? f.q ?? f.search ?? "").toString().trim();
+    const q = String(query || filters?.q || "").trim();
+    const like = `%${q}%`;
+    const status = filters?.status ? toGoldCustomerStatus(filters.status) : null;
+    const pageSize = Math.min(200, Math.max(1, Number(filters?.pageSize ?? filters?.limit ?? 50) || 50));
+    const page = Math.max(1, Number(filters?.page ?? 1) || 1);
+    const offset = Number.isFinite(Number(filters?.offset))
+      ? Math.max(0, Number(filters.offset))
+      : (page - 1) * pageSize;
+
+    const where: any[] = [sql`vendor_id = ${vendorId}`];
     if (q) {
-      const like = `%${q}%`;
-      conditions.push(sql`(
-        ${customers.fullName} ILIKE ${like} OR
-        ${customers.email} ILIKE ${like} OR
-        COALESCE(${customers.phone}, '') ILIKE ${like}
+      where.push(sql`(
+        full_name ILIKE ${like}
+        OR email ILIKE ${like}
+        OR COALESCE(phone, '') ILIKE ${like}
       )`);
     }
-    let dbQuery: any = db.select().from(customers).where(and(...conditions));
-    if (f.limit) {
-      const lim = Math.min(200, Math.max(1, parseInt(String(f.limit), 10)));
-      dbQuery = dbQuery.limit(lim);
-    }
-    return await dbQuery.orderBy(desc(customers.updatedAt));
+    if (status) where.push(sql`account_status = ${status}`);
+
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        global_customer_id AS "globalCustomerId",
+        email,
+        full_name AS "fullName",
+        first_name AS "firstName",
+        last_name AS "lastName",
+        date_of_birth AS "dob",
+        age,
+        gender,
+        phone,
+        location_country AS "locationCountry",
+        location_region AS "locationRegion",
+        location_city AS "locationCity",
+        location_postal_code AS "locationPostalCode",
+        account_status AS "accountStatus",
+        source_system AS "sourceSystem",
+        notes,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        ARRAY[]::text[] AS "customTags"
+      FROM gold.b2b_customers
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY updated_at DESC
+      LIMIT ${pageSize}
+      OFFSET ${offset}
+    `);
+    return (out.rows || []) as Customer[];
   }
 
-  async getMatches(customerId: string, vendorId: string, k = 20): Promise<Product[]> {
-    // Simple matching implementation - in production this would use sophisticated health-aware scoring
-    return await db
-      .select()
-      .from(products)
-      .where(and(eq(products.vendorId, vendorId), eq(products.status, 'active')))
-      .limit(k)
-      .orderBy(desc(products.updatedAt));
+  async getMatches(_customerId: string, vendorId: string, k = 20): Promise<Product[]> {
+    const out = await db.execute(sql`
+      SELECT
+        id,
+        vendor_id AS "vendorId",
+        external_id AS "externalId",
+        name,
+        brand,
+        description,
+        category_id AS "categoryId",
+        barcode,
+        gtin_type AS "gtinType",
+        price,
+        currency,
+        serving_size AS "servingSize",
+        package_weight AS "packageWeight",
+        product_url AS "sourceUrl",
+        notes,
+        status,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM gold.products
+      WHERE vendor_id = ${vendorId} AND status = 'active'
+      ORDER BY updated_at DESC
+      LIMIT ${Math.min(200, Math.max(1, Number(k) || 20))}
+    `);
+    return (out.rows || []) as Product[];
   }
 }
 
-export const storage = new DatabaseStorage(
-  // Dependencies would be injected here in a real implementation
-);
+export const storage = new DatabaseStorage();

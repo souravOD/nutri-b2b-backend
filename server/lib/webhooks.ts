@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { db } from './database.js';
 import { webhookEndpoints, webhookDeliveries } from '@shared/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getSecret } from './supabase.js';
 
 export interface WebhookPayload {
@@ -195,7 +195,7 @@ async function retryWebhookDelivery(deliveryId: string): Promise<void> {
       await deliverWebhook(
         record.endpointId,
         record.eventType,
-        record.payload.data
+        (record.payload as any)?.data
       );
     }
   } catch (error) {
@@ -214,11 +214,13 @@ export async function emitWebhookEvent(
     const endpoints = await db
       .select()
       .from(webhookEndpoints)
-      .where(eq(webhookEndpoints.vendorId, vendorId))
-      .where(eq(webhookEndpoints.enabled, true));
+      .where(and(
+        eq(webhookEndpoints.vendorId, vendorId),
+        eq(webhookEndpoints.enabled, true)
+      ));
 
     // Deliver to all endpoints
-    const deliveryPromises = endpoints.map(endpoint =>
+    const deliveryPromises = endpoints.map((endpoint: any) =>
       deliverWebhook(endpoint.id, eventType, data)
     );
 

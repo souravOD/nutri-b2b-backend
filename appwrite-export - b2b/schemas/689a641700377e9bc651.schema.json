@@ -1,0 +1,215 @@
+{
+  "collection": {
+    "$id": "689a641700377e9bc651",
+    "name": "customers",
+    "enabled": true,
+    "documentSecurity": false,
+    "permissions": []
+  },
+  "attributes": [
+    {
+      "key": "customerId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T21:52:34.015+00:00",
+      "$updatedAt": "2025-08-11T21:52:34.184+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "vendorTeamId",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T21:52:34.722+00:00",
+      "$updatedAt": "2025-08-11T21:52:34.899+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "name",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T21:52:35.415+00:00",
+      "$updatedAt": "2025-08-11T21:52:35.592+00:00",
+      "size": 256,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "status",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": true,
+      "array": false,
+      "$createdAt": "2025-08-11T21:52:36.107+00:00",
+      "$updatedAt": "2025-08-11T21:52:36.282+00:00",
+      "elements": [
+        "active",
+        "inactive"
+      ],
+      "format": "enum",
+      "default": null
+    },
+    {
+      "key": "preferTags",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T21:55:17.220+00:00",
+      "$updatedAt": "2025-08-11T21:55:17.399+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "avoidTags",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T21:55:17.926+00:00",
+      "$updatedAt": "2025-08-11T21:55:18.093+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "allergens",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T21:55:18.662+00:00",
+      "$updatedAt": "2025-08-11T21:55:18.825+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "ingredients",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": true,
+      "$createdAt": "2025-08-11T21:55:19.394+00:00",
+      "$updatedAt": "2025-08-11T21:55:19.560+00:00",
+      "size": 64,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "limitsJson",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T21:55:20.120+00:00",
+      "$updatedAt": "2025-08-11T21:55:20.420+00:00",
+      "size": 4096,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "notes",
+      "type": "string",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T21:55:20.809+00:00",
+      "$updatedAt": "2025-08-11T21:55:20.976+00:00",
+      "size": 2048,
+      "default": null,
+      "encrypt": false
+    },
+    {
+      "key": "updatedAt",
+      "type": "datetime",
+      "status": "available",
+      "error": "",
+      "required": false,
+      "array": false,
+      "$createdAt": "2025-08-11T21:55:21.564+00:00",
+      "$updatedAt": "2025-08-11T21:55:21.722+00:00",
+      "format": "",
+      "default": null
+    }
+  ],
+  "indexes": [
+    {
+      "$id": "8788_5_key_vendor",
+      "$createdAt": "2025-08-11T21:55:27.398+00:00",
+      "$updatedAt": "2025-08-11T21:55:27.496+00:00",
+      "key": "key_vendor",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": [
+        "asc"
+      ]
+    },
+    {
+      "$id": "8788_5_key_vendor_status",
+      "$createdAt": "2025-08-11T21:55:28.134+00:00",
+      "$updatedAt": "2025-08-11T21:55:28.224+00:00",
+      "key": "key_vendor_status",
+      "type": "key",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "vendorTeamId",
+        "status"
+      ],
+      "lengths": [
+        0,
+        0
+      ],
+      "orders": [
+        "asc",
+        "asc"
+      ]
+    },
+    {
+      "$id": "8788_5_ft_name",
+      "$createdAt": "2025-08-11T21:55:28.945+00:00",
+      "$updatedAt": "2025-08-11T21:55:29.281+00:00",
+      "key": "ft_name",
+      "type": "fulltext",
+      "status": "available",
+      "error": "",
+      "attributes": [
+        "name"
+      ],
+      "lengths": [
+        0
+      ],
+      "orders": [
+        "asc"
+      ]
+    }
+  ]
+}
