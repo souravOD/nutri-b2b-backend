@@ -413,6 +413,12 @@ router.post(
             const { run_id, bucket, path, mode } = parsed.data;
             const vendorId = req.auth!.vendorId;
 
+            // Validate path belongs to this vendor (prevent cross-tenant ingestion)
+            const expectedPrefix = `vendors/${vendorId}/`;
+            if (!path.startsWith(expectedPrefix)) {
+                return problem(res, 403, "Storage path does not belong to this vendor");
+            }
+
             // Try to trigger the orchestrator — but don't fail if it's unavailable.
             // The CSV is already safely stored in Supabase Storage.
             let orchestratorRunId: string | null = null;
@@ -651,7 +657,7 @@ router.post(
             const envPrefix = environment === "test" ? "nutri_test_" : "nutri_live_";
             const randomPart = crypto.randomBytes(16).toString("hex");
             const fullKey = `${envPrefix}${randomPart}`;
-            const keyPrefix = fullKey.slice(0, 16);         // for lookup
+            const keyPrefix = crypto.createHash("sha256").update(fullKey).digest("hex").slice(0, 16); // 64-bit lookup prefix
             const keyHash = crypto.createHash("sha256").update(fullKey).digest("hex");
 
             // Generate HMAC secret
