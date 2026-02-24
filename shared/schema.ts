@@ -8,6 +8,7 @@ import {
   timestamp,
   numeric,
   integer,
+  smallint,
   jsonb,
   boolean,
   index,
@@ -69,6 +70,18 @@ export const userLinks = gold.table("b2b_user_links", {
 }, (table) => ({
   uniqueUserVendor: uniqueIndex("idx_b2b_user_links_user_vendor").on(table.userId, table.vendorId),
   uniqueUser: uniqueIndex("idx_b2b_user_links_user_unique").on(table.userId),
+}));
+
+export const systemSettings = gold.table("system_settings", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  key: text("key").notNull(),
+  value: jsonb("value").notNull().default(sql`'{}'::jsonb`),
+  updatedBy: uuid("updated_by").references(() => users.id),
+  updatedAt: timestamp("updated_at").default(sql`now()`),
+}, (table) => ({
+  uniqueVendorKey: uniqueIndex("idx_settings_vendor_key").on(table.vendorId, table.key),
+  vendorIdx: index("idx_settings_vendor").on(table.vendorId),
 }));
 
 export const products = gold.table("products", {
@@ -265,6 +278,29 @@ export const auditLog = gold.table("audit_log", {
 }, (table) => ({
   changedAtIdx: index("audit_log_changed_at_idx").on(table.changedAt),
   recordIdx: index("audit_log_table_record_idx").on(table.tableName, table.recordId),
+}));
+
+// Product Quality Scores (gold schema)
+export const productQualityScores = gold.table("product_quality_scores", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  productId: uuid("product_id").notNull().references(() => products.id),
+  overallScore: smallint("overall_score").notNull().default(0),
+  completeness: smallint("completeness").notNull().default(0),
+  accuracy: smallint("accuracy").notNull().default(0),
+  nutritionScore: smallint("nutrition_score").notNull().default(0),
+  imageScore: smallint("image_score").notNull().default(0),
+  allergenScore: smallint("allergen_score").notNull().default(0),
+  taxonomyScore: smallint("taxonomy_score").notNull().default(0),
+  missingFields: text("missing_fields").array().default(sql`'{}'::text[]`),
+  warnings: jsonb("warnings").default(sql`'[]'::jsonb`),
+  scoredAt: timestamp("scored_at", { withTimezone: true }).default(sql`now()`),
+  scoredBy: text("scored_by").default("system"),
+  runId: uuid("run_id"),
+}, (table) => ({
+  vendorIdx: index("idx_pqs_vendor").on(table.vendorId),
+  scoreIdx: index("idx_pqs_score").on(table.overallScore),
+  productUq: uniqueIndex("product_quality_scores_product_id_key").on(table.productId),
 }));
 
 // API Keys (gold schema)
@@ -550,6 +586,7 @@ export const insertCustomerHealthProfileSchema = createInsertSchema(customerHeal
 export const insertIngestionJobSchema = createInsertSchema(ingestionJobs).omit({ id: true, createdAt: true });
 export const insertWebhookEndpointSchema = createInsertSchema(webhookEndpoints).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertAuditLogSchema = createInsertSchema(auditLog).omit({ id: true, changedAt: true });
+export const insertProductQualityScoreSchema = createInsertSchema(productQualityScores).omit({ id: true, scoredAt: true });
 
 // Select types
 export type Vendor = typeof vendors.$inferSelect;
@@ -562,6 +599,8 @@ export type IngestionJob = typeof ingestionJobs.$inferSelect;
 export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
 export type AuditLogEntry = typeof auditLog.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
+export type ProductQualityScore = typeof productQualityScores.$inferSelect;
+export type InsertProductQualityScore = z.infer<typeof insertProductQualityScoreSchema>;
 export type RawProduct = typeof rawProducts.$inferSelect;
 export type RawCustomer = typeof rawCustomers.$inferSelect;
 

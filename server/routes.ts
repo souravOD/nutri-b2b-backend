@@ -1,5 +1,12 @@
 import type { Express, Request, Response, NextFunction, RequestHandler } from "express";
 import ingestRouter from "./routes/ingest.js";
+import authContextRouter from "./routes/auth-context.js";
+import invitationsRouter from "./routes/invitations.js";
+import usersRouter from "./routes/users.js";
+import vendorsRouter from "./routes/vendors.js";
+import settingsRouter from "./routes/settings.js";
+import auditRouter from "./routes/audit.js";
+import qualityRouter from "./routes/quality.js";
 import { storage } from "./storage.js";
 import { extractJWT, requireAuth } from "./lib/auth.js";
 import { and, eq, desc, sql, inArray } from "drizzle-orm";
@@ -284,6 +291,27 @@ export function registerRoutes(app: Express) {
   app.use("/api/v1/ingest", ingestRouter);
   app.use("/api/v1", ingestRouter);  // keys endpoints at /api/v1/keys
 
+  // ── Auth context (role/permissions for frontend) ──
+  app.use("/api/auth", authContextRouter);
+
+  // ── Invitations CRUD ──
+  app.use("/api/invitations", invitationsRouter);
+
+  // ── Users CRUD ──
+  app.use("/api/users", usersRouter);
+
+  // ── Vendor Management ──
+  app.use("/api/vendors", vendorsRouter);
+
+  // ── Settings ──
+  app.use("/api/settings", settingsRouter);
+
+  // ── Audit Log ──
+  app.use("/api/audit", auditRouter);
+
+  // ── Quality Scores ──
+  app.use("/api/quality", qualityRouter);
+
   // health
   app.get("/health", (_req, res) => {
     ok(res, {
@@ -316,18 +344,34 @@ export function registerRoutes(app: Express) {
     });
   }));
 
-  // vendors (stub if storage.getVendors missing)
+  // GET /vendors — list all vendors (direct SQL, avoids stale Drizzle schema)
   app.get("/vendors", withAuth(async (req: any, res) => {
-    const s: any = storage as any;
-    if (typeof s.getVendors === "function") {
-      try {
-        const vendors = await s.getVendors();
-        return ok(res, { data: vendors });
-      } catch (e: any) {
-        console.warn("[vendors] fallback:", e?.message || e);
-      }
+    try {
+      const result = await db.execute(sql`
+        SELECT id, name, slug, status, team_id, billing_email,
+               contact_email, country, api_endpoint, created_at, updated_at
+        FROM gold.vendors
+        ORDER BY created_at DESC
+        LIMIT 200
+      `);
+      const data = (result.rows || []).map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        status: r.status,
+        teamId: r.team_id,
+        billingEmail: r.billing_email,
+        contactEmail: r.contact_email,
+        country: r.country,
+        apiEndpoint: r.api_endpoint,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      }));
+      return ok(res, { data });
+    } catch (e: any) {
+      console.error("[vendors] GET error:", e?.message || e);
+      return res.status(500).json({ error: "Failed to load vendors" });
     }
-    return ok(res, { data: [] }); // empty list is fine for the Vendors page
   }));
 
   app.post("/admin/vendors/register", withAuth(async (req: any, res) => {
@@ -393,6 +437,8 @@ export function registerRoutes(app: Express) {
         return adminError(res, 502, "appwrite_membership_create_failed", "Failed to add creator as team admin.");
       }
 
+      // Only include fields that exist in the Appwrite vendors collection schema.
+      // phone, country, timezone are NOT attributes in the Appwrite collection.
       const appwriteVendorPayload = {
         name: input.companyName,
         slug: resolvedSlug,
@@ -402,9 +448,6 @@ export function registerRoutes(app: Express) {
         status: "active" as const,
         team_id: team.teamId,
         domains: [domain],
-        ...(input.phone ? { phone: input.phone } : {}),
-        ...(input.country ? { country: input.country } : {}),
-        ...(input.timezone ? { timezone: input.timezone } : {}),
       };
 
       try {
@@ -431,6 +474,8 @@ export function registerRoutes(app: Express) {
       }
 
       try {
+        // Only insert columns that actually exist in gold.vendors.
+        // phone and timezone columns do NOT exist in the table.
         const inserted = await db.execute(sql`
           INSERT INTO gold.vendors (
             name,
@@ -441,9 +486,7 @@ export function registerRoutes(app: Express) {
             owner_user_id,
             billing_email,
             contact_email,
-            phone,
-            country,
-            timezone
+            country
           )
           VALUES (
             ${input.companyName},
@@ -454,9 +497,7 @@ export function registerRoutes(app: Express) {
             ${appwriteUser.id},
             ${input.billingEmail},
             ${input.billingEmail},
-            ${input.phone},
-            ${input.country},
-            ${input.timezone}
+            ${input.country}
           )
           RETURNING id, name, slug, team_id, domains
         `);
@@ -1336,8 +1377,12 @@ export function registerRoutes(app: Express) {
   // Upload CSV + trigger the orchestrator.
   // Returns the orchestration run_id for the frontend to poll.
   app.post("/jobs/upload",
-    uploadMw.single("file"),
     withAuth(async (req: any, res) => {
+      // Auth runs FIRST, then multer parses upload — prevents unauthenticated file uploads
+      await new Promise<void>((resolve, reject) => {
+        uploadMw.single("file")(req, res, (err: any) => err ? reject(err) : resolve());
+      });
+
       const vendorId = req.auth?.vendorId as string | undefined;
       if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
 
