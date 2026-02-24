@@ -11,17 +11,16 @@ import { Client, Users } from "node-appwrite";
 const router = Router();
 
 // ── Appwrite admin helpers ──────────────────────────────────────────────────
-function mustEnv(key: string): string {
-    const v = process.env[key];
-    if (!v) throw new Error(`Missing env var: ${key}`);
-    return v;
-}
+function createAdminClient(): Client | null {
+    const endpoint = process.env.APPWRITE_ENDPOINT;
+    const project = process.env.APPWRITE_PROJECT_ID;
+    const key = process.env.APPWRITE_API_KEY;
+    if (!endpoint || !project || !key) return null;
 
-function createAdminClient(): Client {
     return new Client()
-        .setEndpoint(mustEnv("APPWRITE_ENDPOINT"))
-        .setProject(mustEnv("APPWRITE_PROJECT_ID"))
-        .setKey(mustEnv("APPWRITE_API_KEY"));
+        .setEndpoint(endpoint)
+        .setProject(project)
+        .setKey(key);
 }
 
 // ── GET /profile ────────────────────────────────────────────────────────────
@@ -54,9 +53,12 @@ router.get(
             // Get Appwrite user for the name (may differ from display_name)
             let appwriteName = "";
             try {
-                const users = new Users(createAdminClient());
-                const awUser = await users.get(appwriteUserId);
-                appwriteName = awUser.name || "";
+                const client = createAdminClient();
+                if (client && appwriteUserId) {
+                    const users = new Users(client);
+                    const awUser = await users.get(appwriteUserId);
+                    appwriteName = awUser.name || "";
+                }
             } catch {
                 // Non-fatal — Appwrite might be unreachable
             }
@@ -128,8 +130,11 @@ router.put(
             // Sync display_name to Appwrite (non-fatal)
             if (displayName) {
                 try {
-                    const users = new Users(createAdminClient());
-                    await users.updateName(appwriteUserId, displayName);
+                    const client = createAdminClient();
+                    if (client) {
+                        const users = new Users(client);
+                        await users.updateName(appwriteUserId, displayName);
+                    }
                 } catch (err: any) {
                     console.warn("[profile] Appwrite sync failed (non-fatal):", err?.message || err);
                 }
