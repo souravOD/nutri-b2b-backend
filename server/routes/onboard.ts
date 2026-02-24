@@ -442,11 +442,20 @@ router.post("/self", async (req: Request, res: Response) => {
       .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
     const isSuperadmin = superadminEmails.includes(email);
 
-    // Superadmin without a vendor: use first available vendor as platform anchor
-    if (!resolved.vendor && !resolved.mismatch && isSuperadmin) {
+    // Superadmin without a vendor OR with a mismatch: use first available vendor as platform anchor.
+    // Superadmins manage the entire platform and may belong to multiple vendor teams,
+    // so strict team/profile/domain agreement is not required for them.
+    if (isSuperadmin && (!resolved.vendor || resolved.mismatch)) {
       trace.push("superadmin.vendor_fallback");
+      if (resolved.mismatch) {
+        console.info(`[/onboard/self] Superadmin bypassing mismatch: ${resolved.mismatch}`);
+      }
       if (vendors.length > 0) {
-        resolved = { vendor: vendors[0], source: "superadmin_fallback", mismatch: null };
+        // Prefer the team-resolved vendor if available, otherwise first vendor
+        const teamVendor = membership?.teamId
+          ? vendors.find(v => v.team_id === membership.teamId) || null
+          : null;
+        resolved = { vendor: teamVendor || vendors[0], source: "superadmin_fallback", mismatch: null };
       } else {
         return jsonError(res, 409, "vendor_not_provisioned",
           "No vendors exist yet. Create at least one vendor before bootstrapping superadmin.",
@@ -455,6 +464,13 @@ router.post("/self", async (req: Request, res: Response) => {
     }
 
     if (resolved.mismatch) {
+      console.error("[/onboard/self] MISMATCH:", JSON.stringify({
+        mismatch: resolved.mismatch,
+        profileVendorSlug,
+        membershipTeamId: membership?.teamId || profileTeamId,
+        domain,
+        trace,
+      }));
       return jsonError(
         res,
         409,

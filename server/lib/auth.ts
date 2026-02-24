@@ -78,6 +78,45 @@ export function computePermissions(role: AuthContext["role"]): string[] {
   return ["read:products", "read:customers", "read:matches"];
 }
 
+/**
+ * Async permission resolver — queries gold.b2b_role_permissions for dynamic
+ * permissions. Falls back to the hardcoded computePermissions() if the table
+ * is empty, missing, or on any DB error (zero-downtime backward compatibility).
+ *
+ * Vendor-specific overrides: rows with a non-null vendor_id take precedence
+ * over global defaults (vendor_id IS NULL). This lets vendor_admins customize
+ * operator/viewer permissions per vendor without affecting other tenants.
+ */
+export async function resolvePermissions(
+  role: AuthContext["role"],
+  vendorId: string | null,
+): Promise<string[]> {
+  // Superadmin always gets wildcard — no DB query needed
+  if (role === "superadmin") return ["*"];
+
+  try {
+    const result = await db.execute(sql`
+      SELECT permission FROM gold.b2b_role_permissions
+      WHERE role = ${role}
+        AND (vendor_id = ${vendorId}::uuid OR vendor_id IS NULL)
+      ORDER BY vendor_id NULLS LAST
+    `);
+
+    const rows = result.rows as { permission: string }[];
+    if (!rows || rows.length === 0) {
+      // Table empty or missing — fall back to hardcoded defaults
+      return computePermissions(role);
+    }
+
+    // Deduplicate (vendor-specific + global may overlap)
+    return Array.from(new Set(rows.map((r) => r.permission)));
+  } catch (err: any) {
+    // DB error — fall back to hardcoded defaults for availability
+    console.warn("[auth] resolvePermissions DB fallback:", err?.message || err);
+    return computePermissions(role);
+  }
+}
+
 async function loadProfileHint(appwriteUserId: string) {
   const endpoint = process.env.APPWRITE_ENDPOINT;
   const project = process.env.APPWRITE_PROJECT_ID;
@@ -324,7 +363,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       email: row.email ?? email,
       vendorId: row.vendor_id,
       role: row.role,
-      permissions: computePermissions(row.role),
+      permissions: await resolvePermissions(row.role, row.vendor_id),
     };
 
     next();

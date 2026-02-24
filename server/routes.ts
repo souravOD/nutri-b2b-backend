@@ -7,6 +7,9 @@ import vendorsRouter from "./routes/vendors.js";
 import settingsRouter from "./routes/settings.js";
 import auditRouter from "./routes/audit.js";
 import qualityRouter from "./routes/quality.js";
+import alertsRouter from "./routes/alerts.js";
+import complianceRouter from "./routes/compliance.js";
+import profileRouter from "./routes/profile.js";
 import { storage } from "./storage.js";
 import { extractJWT, requireAuth } from "./lib/auth.js";
 import { and, eq, desc, sql, inArray } from "drizzle-orm";
@@ -311,6 +314,15 @@ export function registerRoutes(app: Express) {
 
   // ── Quality Scores ──
   app.use("/api/quality", qualityRouter);
+
+  // ── Alerts ──
+  app.use("/api/alerts", alertsRouter);
+
+  // ── Compliance ──
+  app.use("/api/compliance", complianceRouter);
+
+  // ── Profile ──
+  app.use("/api/profile", profileRouter);
 
   // health
   app.get("/health", (_req, res) => {

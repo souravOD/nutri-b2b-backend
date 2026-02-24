@@ -89,7 +89,7 @@ router.post(
     async (req: Request, res: Response) => {
         try {
             const auth: AuthContext = (req as any).auth;
-            const { email, role = "vendor_viewer", message } = req.body;
+            const { email, role = "vendor_viewer", message, vendor_id } = req.body;
 
             if (!email || typeof email !== "string") {
                 return problem(res, 400, "email is required");
@@ -103,11 +103,27 @@ router.post(
                 return problem(res, 400, `Invalid role: ${role}. Must be one of: ${validRoles.join(", ")}`);
             }
 
+            // Superadmin can invite to a different vendor by passing vendor_id
+            let targetVendorId = auth.vendorId;
+            if (vendor_id && typeof vendor_id === "string" && vendor_id.trim()) {
+                if (auth.role !== "superadmin") {
+                    return problem(res, 403, "Only superadmins can invite users to other vendors.");
+                }
+                // Validate that the target vendor exists
+                const vendorCheck = await db.execute(sql`
+                    SELECT id FROM gold.vendors WHERE id = ${vendor_id.trim()}::uuid LIMIT 1
+                `);
+                if (!vendorCheck.rows?.length) {
+                    return problem(res, 404, "Target vendor not found.");
+                }
+                targetVendorId = vendor_id.trim();
+            }
+
             // Check for existing pending invitation — update it instead of blocking
             const existing = await db.execute(sql`
         SELECT id, appwrite_doc_id FROM gold.invitations
         WHERE lower(email) = ${normalizedEmail}
-          AND vendor_id = ${auth.vendorId}::uuid
+          AND vendor_id = ${targetVendorId}::uuid
           AND status = 'pending'
         LIMIT 1
       `);
@@ -142,7 +158,7 @@ router.post(
         INSERT INTO gold.invitations (id, vendor_id, email, role, invited_by, status, message, token, expires_at)
         VALUES (
           ${invId}::uuid,
-          ${auth.vendorId}::uuid,
+          ${targetVendorId}::uuid,
           ${normalizedEmail},
           ${role},
           ${auth.userId}::uuid,
@@ -157,7 +173,7 @@ router.post(
             let teamId: string | null = null;
             try {
                 const vendorRow = await db.execute(sql`
-          SELECT team_id FROM gold.vendors WHERE id = ${auth.vendorId}::uuid LIMIT 1
+          SELECT team_id FROM gold.vendors WHERE id = ${targetVendorId}::uuid LIMIT 1
         `);
                 teamId = (vendorRow.rows?.[0] as any)?.team_id || null;
             } catch (err: any) {
@@ -175,7 +191,7 @@ router.post(
                         ${normalizedEmail},
                         ${displayName},
                         'invitation',
-                        ${auth.vendorId}::uuid,
+                        ${targetVendorId}::uuid,
                         'invited'
                     )
                     ON CONFLICT ((lower(email))) DO UPDATE SET updated_at = now()
@@ -190,7 +206,7 @@ router.post(
                         INSERT INTO gold.b2b_user_links (user_id, vendor_id, role, status)
                         VALUES (
                             ${invitedUserId}::uuid,
-                            ${auth.vendorId}::uuid,
+                            ${targetVendorId}::uuid,
                             ${role},
                             'invited'
                         )
@@ -213,7 +229,7 @@ router.post(
                 try {
                     const adb = adminDatabases();
                     const doc = await adb.createDocument(getDbId(), invCol, ID.unique(), {
-                        vendor_id: auth.vendorId,
+                        vendor_id: targetVendorId,
                         team_id: teamId || "",
                         email: normalizedEmail,
                         role,
@@ -474,7 +490,7 @@ router.post(
                     UPDATE gold.b2b_users
                     SET
                         appwrite_user_id = ${userId},
-                        display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
+                        display_name = ${displayName},
                         source = 'appwrite',
                         status = 'active',
                         updated_at = now()
@@ -497,6 +513,47 @@ router.post(
             } catch (activateErr: any) {
                 // Non-fatal — /onboard/self can still fix this on next login
                 console.warn("[set-password] b2b_users activation skipped:", activateErr?.message);
+            }
+
+            // 8) Upsert Appwrite user_profiles with the correct vendor info
+            try {
+                const profilesCol = process.env.APPWRITE_USERPROFILES_COL;
+                const dbId = process.env.APPWRITE_DB_ID;
+                if (profilesCol && dbId) {
+                    const adb = adminDatabases();
+                    // Look up vendor slug for the profile
+                    const vendorInfo = await db.execute(sql`
+                        SELECT slug, team_id FROM gold.vendors WHERE id = ${inv.vendor_id}::uuid LIMIT 1
+                    `);
+                    const vRow = vendorInfo.rows?.[0] as any;
+                    const vendorSlug = vRow?.slug || "";
+                    const profileTeamId = vRow?.team_id || "";
+
+                    // Try to update existing profile, or create new one
+                    try {
+                        await adb.updateDocument(dbId, profilesCol, userId, {
+                            vendor_id: vendorSlug,
+                            vendor_slug: vendorSlug,
+                            role: inv.role,
+                            team_id: profileTeamId,
+                            full_name: fullName || inv.email.split("@")[0] || "user",
+                        });
+                    } catch {
+                        // Document doesn't exist — create it
+                        await adb.createDocument(dbId, profilesCol, userId, {
+                            vendor_id: vendorSlug,
+                            vendor_slug: vendorSlug,
+                            full_name: fullName || inv.email.split("@")[0] || "user",
+                            role: inv.role,
+                            team_id: profileTeamId,
+                            created_at: new Date().toISOString(),
+                        });
+                    }
+                    console.info(`[set-password] Upserted Appwrite user_profiles for ${inv.email}`);
+                }
+            } catch (profileErr: any) {
+                // Non-fatal — /onboard/self will fix this on next login
+                console.warn("[set-password] user_profiles upsert skipped:", profileErr?.message);
             }
 
             console.info(`[POST /invitations/set-password] Password set for ${inv.email} (userId=${userId})`);

@@ -28,6 +28,10 @@ export default app;
     "/api/audit", "/api/quality",     // Phase 6–7
     "/api/ingest",                      // ingest routes
     "/api/invitations",                  // invitation routes
+    "/api/alerts",                       // alerts
+    "/api/compliance",                   // compliance checks
+    "/api/profile",                      // user profile
+    "/api/metrics",                      // metrics
   ];
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {
