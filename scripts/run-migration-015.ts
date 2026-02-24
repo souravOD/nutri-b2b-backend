@@ -4,7 +4,11 @@
  */
 import pg from 'pg';
 
-const DATABASE_URL = 'postgresql://postgres.wpgbagzljljnczmhbcdq:Pixel%401998@aws-1-us-east-1.pooler.supabase.com:6543/postgres';
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+    console.error("Missing required env var: DATABASE_URL");
+    process.exit(1);
+}
 
 const client = new pg.Client({
     connectionString: DATABASE_URL,

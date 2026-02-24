@@ -16,12 +16,14 @@ const mockSelect = jest.fn();
 const mockFrom = jest.fn();
 const mockWhere = jest.fn();
 const mockLimit = jest.fn();
+const mockExecute = jest.fn();
 
 // Mock database
 jest.mock("../../lib/database.js", () => ({
     db: {
         select: (...args: any[]) => mockSelect(...args),
         insert: jest.fn(),
+        execute: (...args: any[]) => mockExecute(...args),
     },
     readDb: { select: jest.fn() },
     primaryPool: { query: jest.fn() },
@@ -144,6 +146,7 @@ describe("Quality Router", () => {
         mockFrom.mockReset();
         mockWhere.mockReset();
         mockLimit.mockReset();
+        mockExecute.mockReset();
         mockScoreAndUpsert.mockReset();
         mockGetVendorQualitySummary.mockReset();
     });
@@ -279,6 +282,7 @@ describe("Quality Router", () => {
         };
 
         it("rescores a product and returns the result", async () => {
+            mockExecute.mockResolvedValue({ rows: [{ "?column?": 1 }] });
             mockScoreAndUpsert.mockResolvedValue(rescoreResult);
 
             const app = createApp(adminAuth);
@@ -291,7 +295,17 @@ describe("Quality Router", () => {
             expect(mockScoreAndUpsert).toHaveBeenCalledWith("prod-1", "vendor-1", undefined, "user-admin-id");
         });
 
+        it("returns 403 when product does not belong to vendor", async () => {
+            mockExecute.mockResolvedValue({ rows: [] });
+
+            const app = createApp(adminAuth);
+            const res = await request(app).post("/quality/products/prod-other/rescore");
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe("forbidden");
+        });
+
         it("returns 404 when product not found", async () => {
+            mockExecute.mockResolvedValue({ rows: [{ "?column?": 1 }] });
             mockScoreAndUpsert.mockRejectedValue(new Error("Product xyz not found"));
 
             const app = createApp(adminAuth);
@@ -306,6 +320,7 @@ describe("Quality Router", () => {
         });
 
         it("allows vendor_operator (has write:products)", async () => {
+            mockExecute.mockResolvedValue({ rows: [{ "?column?": 1 }] });
             mockScoreAndUpsert.mockResolvedValue(rescoreResult);
 
             const app = createApp(operatorAuth);
@@ -314,6 +329,7 @@ describe("Quality Router", () => {
         });
 
         it("allows superadmin", async () => {
+            mockExecute.mockResolvedValue({ rows: [{ "?column?": 1 }] });
             mockScoreAndUpsert.mockResolvedValue(rescoreResult);
 
             const app = createApp(superadminAuth);

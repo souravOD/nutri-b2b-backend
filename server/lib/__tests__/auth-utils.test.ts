@@ -65,3 +65,35 @@ describe("extractJWT", () => {
         expect(jwt).toBe("first-token");
     });
 });
+
+// ── computePermissions ──────────────────────────────────────────
+
+import { computePermissions } from "../auth.js";
+
+describe("computePermissions", () => {
+    it("superadmin gets wildcard", () => {
+        expect(computePermissions("superadmin")).toEqual(["*"]);
+    });
+
+    it("vendor_admin gets admin-level permissions", () => {
+        const perms = computePermissions("vendor_admin");
+        expect(perms).toContain("manage:users");
+        expect(perms).toContain("manage:api_keys");
+        expect(perms).toContain("write:vendors");
+        expect(perms).toContain("read:audit");
+    });
+
+    it("vendor_operator gets read+write but not manage", () => {
+        const perms = computePermissions("vendor_operator");
+        expect(perms).toContain("read:products");
+        expect(perms).toContain("write:products");
+        expect(perms).toContain("write:ingest");
+        expect(perms).not.toContain("manage:users");
+        expect(perms).not.toContain("manage:api_keys");
+    });
+
+    it("vendor_viewer gets read-only", () => {
+        const perms = computePermissions("vendor_viewer");
+        expect(perms).toEqual(["read:products", "read:customers", "read:matches"]);
+    });
+});

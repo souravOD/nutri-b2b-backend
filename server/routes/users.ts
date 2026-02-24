@@ -146,26 +146,47 @@ router.get(
             const vendorId = resolveVendorScope(auth, req.query.vendor_id as string);
             const { userId } = req.params;
 
-            const result = await db.execute(sql`
-                SELECT
-                    u.id,
-                    u.email,
-                    u.display_name,
-                    u.appwrite_user_id,
-                    ul.role,
-                    ul.status,
-                    ul.vendor_id,
-                    ul.created_at,
-                    ul.updated_at
-                FROM gold.b2b_user_links ul
-                JOIN gold.b2b_users u ON u.id = ul.user_id
-                WHERE u.id = ${userId}::uuid
-                  AND ul.vendor_id = ${vendorId}::uuid
-                LIMIT 1
-            `);
+            let result;
+            if (vendorId) {
+                result = await db.execute(sql`
+                    SELECT
+                        u.id,
+                        u.email,
+                        u.display_name,
+                        u.appwrite_user_id,
+                        ul.role,
+                        ul.status,
+                        ul.vendor_id,
+                        ul.created_at,
+                        ul.updated_at
+                    FROM gold.b2b_user_links ul
+                    JOIN gold.b2b_users u ON u.id = ul.user_id
+                    WHERE u.id = ${userId}::uuid
+                      AND ul.vendor_id = ${vendorId}::uuid
+                    LIMIT 1
+                `);
+            } else {
+                // Superadmin without vendor filter — find any link for this user
+                result = await db.execute(sql`
+                    SELECT
+                        u.id,
+                        u.email,
+                        u.display_name,
+                        u.appwrite_user_id,
+                        ul.role,
+                        ul.status,
+                        ul.vendor_id,
+                        ul.created_at,
+                        ul.updated_at
+                    FROM gold.b2b_user_links ul
+                    JOIN gold.b2b_users u ON u.id = ul.user_id
+                    WHERE u.id = ${userId}::uuid
+                    LIMIT 1
+                `);
+            }
 
             if ((result.rows?.length || 0) === 0) {
-                return problem(res, 404, "User not found in this vendor");
+                return problem(res, 404, "User not found");
             }
 
             return res.json({ user: result.rows![0] });
