@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from './database.js';
+import { logger } from './logger.js';
 import { webhookEndpoints, webhookDeliveries } from '@shared/schema';
 import { and, eq } from 'drizzle-orm';
 import { getSecret } from './supabase.js';
@@ -43,7 +44,7 @@ export function verifyWebhookSignature(
     // Verify signature
     const expectedSignature = signWebhookPayload(payload, secret, timestamp);
     const providedSignature = signature.replace('sha256=', '');
-    
+
     return crypto.timingSafeEqual(
       Buffer.from(expectedSignature, 'hex'),
       Buffer.from(providedSignature, 'hex')
@@ -68,13 +69,13 @@ export async function deliverWebhook(
       .limit(1);
 
     if (!endpoint[0] || !endpoint[0].enabled) {
-      console.log(`Webhook endpoint ${endpointId} not found or disabled`);
+      logger.warn(`Webhook endpoint ${endpointId} not found or disabled`);
       return;
     }
 
     const config = endpoint[0];
     const timestamp = Math.floor(Date.now() / 1000);
-    
+
     const payload: WebhookPayload = {
       eventType,
       vendorId: config.vendorId,
@@ -84,7 +85,7 @@ export async function deliverWebhook(
     };
 
     const payloadString = JSON.stringify(payload);
-    
+
     // Get webhook secret from vault
     let signature = '';
     if (config.secretRef) {
@@ -129,17 +130,17 @@ export async function deliverWebhook(
         await db.update(webhookDeliveries)
           .set({ status: 'delivered' })
           .where(eq(webhookDeliveries.id, deliveryId));
-        
-        console.log(`Webhook delivered successfully to ${config.url}`);
+
+        logger.info(`Webhook delivered successfully to ${config.url}`);
       } else {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
     } catch (error) {
       const errorMessage = (error as Error).message;
-      
+
       // Mark as failed and schedule retry if needed
       const shouldRetry = delivery[0].attempt < (config.retriesMax || 3);
-      
+
       await db.update(webhookDeliveries)
         .set({
           status: shouldRetry ? 'retry' : 'failed',
@@ -178,7 +179,7 @@ async function retryWebhookDelivery(deliveryId: string): Promise<void> {
 
     // Update attempt count
     await db.update(webhookDeliveries)
-      .set({ 
+      .set({
         attempt: newAttempt,
         status: 'pending'
       })

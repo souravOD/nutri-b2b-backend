@@ -141,6 +141,7 @@ async function touchLastUsed(keyId: string): Promise<void> {
 function buildApiKeyAuthContext(vendorId: string, scopes: string[]): AuthContext {
     return {
         userId: "api-key",
+        appwriteUserId: "api-key",
         email: "api@system",
         vendorId,
         role: "vendor_operator",     // API keys get operator-level access
@@ -167,13 +168,19 @@ export function universalAuth(requiredScopes?: string[]) {
         const apiKeyHeader = req.headers["x-api-key"] as string | undefined;
 
         try {
-            // ── Path 0: Dev bypass (development only) ────────────────
-            if (process.env.NODE_ENV === "development" && req.headers["x-dev-bypass"] === "true") {
+            // ── Path 0: Dev bypass (development only, requires secret) ──
+            const bypassSecret = process.env.DEV_BYPASS_SECRET;
+            if (
+                process.env.NODE_ENV === "development" &&
+                bypassSecret &&
+                req.headers["x-dev-bypass"] === bypassSecret
+            ) {
                 req.auth = {
                     userId: "dev-user",
+                    appwriteUserId: "dev-user",
                     email: "dev@localhost",
                     vendorId: req.headers["x-dev-vendor-id"] as string || "00000000-0000-0000-0000-000000000000",
-                    role: "superadmin" as any,
+                    role: "superadmin",
                     permissions: ["*"],
                 };
                 console.warn("[universalAuth] ⚠️  DEV BYPASS active — not for production!");

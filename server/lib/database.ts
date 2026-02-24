@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { logger } from "./logger.js";
 
 
 function sslFor(url: string | undefined) {
@@ -41,13 +42,13 @@ export const readDb = drizzle(replicaPool);
 // Optional: log a one-time probe for clarity
 primaryPool
   .query("select current_setting('search_path') as search_path")
-  .then((r) => console.log(`[db] primary connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
+  .then((r) => logger.info(`[db] primary connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
   .catch((e) => console.error("[db] primary failed", e));
 
 if (replicaPool !== primaryPool) {
   replicaPool
     .query("select current_setting('search_path') as search_path")
-    .then((r) => console.log(`[db] read-replica connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
+    .then((r) => logger.info(`[db] read-replica connected (search_path=${r.rows?.[0]?.search_path ?? "unknown"})`))
     .catch((e) => console.warn("[db] read-replica failed, using primary instead"));
 }
 

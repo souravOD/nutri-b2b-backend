@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { logger } from './logger.js';
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   throw new Error("SUPABASE_URL and SUPABASE_ANON_KEY environment variables are required");
@@ -31,7 +32,7 @@ export async function ensureBucket(name: string) {
   }
 
   // getBucket returned no data — bucket doesn't exist, try to create it
-  console.log(`[storage] Bucket "${name}" not found (${getErr?.message ?? 'no data'}), creating…`);
+  logger.info(`[storage] Bucket "${name}" not found (${getErr?.message ?? 'no data'}), creating…`);
   const { error: createErr } = await supabaseAdmin.storage.createBucket(name, {
     public: false,
     fileSizeLimit: 104857600, // 100MB
@@ -41,12 +42,12 @@ export async function ensureBucket(name: string) {
   if (createErr) {
     // If the bucket was created by another concurrent request, that's OK
     if (createErr.message?.includes('already exists')) {
-      console.log(`[storage] Bucket "${name}" was created concurrently — OK`);
+      logger.info(`[storage] Bucket "${name}" was created concurrently — OK`);
       return;
     }
     throw new Error(`Failed to create storage bucket "${name}": ${createErr.message}`);
   }
-  console.log(`[storage] Bucket "${name}" created successfully`);
+  logger.info(`[storage] Bucket "${name}" created successfully`);
 }
 
 // TUS resumable upload helper

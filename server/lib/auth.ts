@@ -22,6 +22,7 @@ declare global {
 
 export interface AuthContext {
   userId: string;
+  appwriteUserId: string;
   email: string;
   vendorId: string;
   role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
@@ -43,7 +44,7 @@ type VendorRow = {
 // Re-export for any callers that imported from this file
 export { extractJWT };
 
-function computePermissions(role: AuthContext["role"]): string[] {
+export function computePermissions(role: AuthContext["role"]): string[] {
   if (role === "superadmin") return ["*"];
   if (role === "vendor_admin") {
     return [
@@ -57,6 +58,9 @@ function computePermissions(role: AuthContext["role"]): string[] {
       "write:ingest",
       "read:matches",
       "read:audit",
+      "manage:users",
+      "manage:api_keys",
+      "manage:settings",
     ];
   }
   if (role === "vendor_operator") {
@@ -70,6 +74,7 @@ function computePermissions(role: AuthContext["role"]): string[] {
       "read:matches",
     ];
   }
+  // vendor_viewer (default)
   return ["read:products", "read:customers", "read:matches"];
 }
 
@@ -293,7 +298,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       LIMIT 1
     `);
 
-    const row: any = q.rows?.[0];
+    interface AuthRow {
+      user_id: string;
+      email: string;
+      vendor_id: string;
+      role: AuthContext["role"];
+    }
+
+    const row = q.rows?.[0] as unknown as AuthRow | undefined;
     if (!row) {
       const hint = await buildVendorHint(appwriteUserId, email);
       const status = hint.code === "user_not_linked" ? 403 : 409;
@@ -308,10 +320,11 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
     (req as any).auth = {
       userId: row.user_id,
+      appwriteUserId,
       email: row.email ?? email,
       vendorId: row.vendor_id,
-      role: row.role as any,
-      permissions: computePermissions(row.role as any),
+      role: row.role,
+      permissions: computePermissions(row.role),
     };
 
     next();
@@ -339,4 +352,74 @@ export function requirePermission(context: AuthContext, permission: string): voi
 export function requireRole(context: AuthContext, ...allowed: AuthContext["role"][]): void {
   if (context.role === "superadmin") return;
   if (!allowed.includes(context.role)) throw new Error(`Role not authorized: ${context.role}`);
+}
+
+/**
+ * Express middleware factory: rejects with 403 if the authenticated user
+ * lacks ANY of the listed permissions. Must be used AFTER requireAuth/withAuth.
+ *
+ * Usage:  app.get("/admin", withAuth, requirePermissionMiddleware("manage:users"), handler)
+ */
+export function requirePermissionMiddleware(...perms: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const auth: AuthContext | undefined = (req as any).auth || (res as any).locals?.auth;
+    if (!auth) {
+      return res.status(401).json({
+        type: "about:blank",
+        title: "Unauthorized",
+        status: 401,
+        code: "missing_auth",
+        detail: "No auth context — call requireAuth first",
+      });
+    }
+
+    const granted = auth.permissions.includes("*") ||
+      perms.every(p => auth.permissions.includes(p));
+
+    if (!granted) {
+      return res.status(403).json({
+        type: "about:blank",
+        title: "Forbidden",
+        status: 403,
+        code: "permission_denied",
+        detail: `Missing permission(s): ${perms.join(", ")}`,
+      });
+    }
+
+    next();
+  };
+}
+
+/**
+ * Express middleware factory: rejects with 403 if the authenticated user
+ * does not hold one of the listed roles. Superadmin always passes.
+ * Must be used AFTER requireAuth/withAuth.
+ *
+ * Usage:  app.post("/admin", withAuth, requireRoleMiddleware("superadmin"), handler)
+ */
+export function requireRoleMiddleware(...roles: AuthContext["role"][]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const auth: AuthContext | undefined = (req as any).auth || (res as any).locals?.auth;
+    if (!auth) {
+      return res.status(401).json({
+        type: "about:blank",
+        title: "Unauthorized",
+        status: 401,
+        code: "missing_auth",
+        detail: "No auth context — call requireAuth first",
+      });
+    }
+
+    if (auth.role === "superadmin" || roles.includes(auth.role)) {
+      return next();
+    }
+
+    return res.status(403).json({
+      type: "about:blank",
+      title: "Forbidden",
+      status: 403,
+      code: "role_denied",
+      detail: `Required role(s): ${roles.join(", ")}. Your role: ${auth.role}`,
+    });
+  };
 }

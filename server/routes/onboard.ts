@@ -336,6 +336,7 @@ async function ensureUserLink(params: {
   const hit = existing.rows?.[0] as DbUserLinkRow | undefined;
 
   if (!hit) {
+    // No link exists — create one with the resolved vendor + role
     const ins = await db.execute(sql`
       INSERT INTO gold.b2b_user_links (user_id, vendor_id, role, status)
       VALUES (
@@ -349,25 +350,23 @@ async function ensureUserLink(params: {
     return ins.rows?.[0] as DbUserLinkRow;
   }
 
-  if (
-    hit.vendor_id !== params.vendorId ||
-    hit.role !== params.role ||
-    hit.status !== "active"
-  ) {
-    const upd = await db.execute(sql`
-      UPDATE gold.b2b_user_links
-      SET
-        vendor_id = ${params.vendorId}::uuid,
-        role = ${params.role},
-        status = 'active',
-        updated_at = now()
-      WHERE user_id = ${params.userId}::uuid
-      RETURNING user_id, vendor_id, role, status
-    `);
-    return upd.rows?.[0] as DbUserLinkRow;
+  // Already active — preserve existing vendor_id and role.
+  // This prevents onboard/self from overwriting invitation-assigned data
+  // (e.g. a gmail.com user invited to odysseyts being re-resolved to google).
+  if (hit.status === "active") {
+    return hit;
   }
 
-  return hit;
+  // Status is 'invited' — activate it but preserve the vendor/role set by the invitation
+  const upd = await db.execute(sql`
+    UPDATE gold.b2b_user_links
+    SET
+      status = 'active',
+      updated_at = now()
+    WHERE user_id = ${params.userId}::uuid
+    RETURNING user_id, vendor_id, role, status
+  `);
+  return upd.rows?.[0] as DbUserLinkRow;
 }
 
 router.post("/self", async (req: Request, res: Response) => {
@@ -430,11 +429,28 @@ router.post("/self", async (req: Request, res: Response) => {
 
     trace.push("vendor.resolve.order_team_slug_domain");
     const domain = emailDomain(email);
-    const resolved = resolveVendor(vendors, {
+    let resolved = resolveVendor(vendors, {
       membershipTeamId: membership?.teamId || profileTeamId,
       profileVendorSlug,
       domain,
     });
+
+    // ── Superadmin env bootstrap ─────────────────────────────────
+    const superadminEmails = (process.env.SUPERADMIN_EMAILS || "")
+      .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+    const isSuperadmin = superadminEmails.includes(email);
+
+    // Superadmin without a vendor: use first available vendor as platform anchor
+    if (!resolved.vendor && !resolved.mismatch && isSuperadmin) {
+      trace.push("superadmin.vendor_fallback");
+      if (vendors.length > 0) {
+        resolved = { vendor: vendors[0], source: "superadmin_fallback", mismatch: null };
+      } else {
+        return jsonError(res, 409, "vendor_not_provisioned",
+          "No vendors exist yet. Create at least one vendor before bootstrapping superadmin.",
+          { trace });
+      }
+    }
 
     if (resolved.mismatch) {
       return jsonError(
@@ -467,7 +483,7 @@ router.post("/self", async (req: Request, res: Response) => {
       );
     }
 
-    const role = membership?.role || profileRole;
+    const role = isSuperadmin ? ("superadmin" as const) : (membership?.role || profileRole);
 
     trace.push("users.upsert");
     const user = await getOrCreateUser({
