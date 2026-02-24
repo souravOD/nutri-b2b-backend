@@ -69,11 +69,20 @@ async function buildApp() {
     return res.status(403).json({ ok: false, message: "CORS blocked" });
   });
 
-  // /api/* is not used by the app; keep parity with local server
-  app.all(/^\/api(\/|$)/, (req, res) => {
+  // Allow known /api/* route prefixes through; catch unrecognised ones
+  const knownApiPrefixes = [
+    "/api/onboard", "/api/v1",
+    "/api/auth", "/api/users",
+    "/api/vendors", "/api/settings",
+    "/api/audit", "/api/quality",
+    "/api/ingest",
+  ];
+
+  app.all(/^\/api(\/|$)/, (req, res, next) => {
+    if (knownApiPrefixes.some(p => req.path.startsWith(p))) return next();
     return res.status(404).json({
       ok: false,
-      message: "This backend does not use '/api'. Call unprefixed routes like /products, /customers, /jobs, /metrics, /health, /onboard.",
+      message: "Unknown /api route. Known prefixes: " + knownApiPrefixes.join(", "),
       path: req.path,
     });
   });

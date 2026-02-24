@@ -1,10 +1,12 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import "dotenv/config";
 import http from "http";
+import { logger } from "./lib/logger.js";
 
 import { registerRoutes } from "./routes.js";
 import { setupVite, serveStatic, log } from "./vite.js";
 import onboardRouter from "./routes/onboard.js";
+import invitationsRouter from "./routes/invitations.js";
 
 const PORT = Number(process.env.PORT || 5000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -18,13 +20,22 @@ export default app;
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
+  // Allow known /api/* route prefixes through; catch unrecognised ones
+  const knownApiPrefixes = [
+    "/api/onboard", "/api/v1",         // original
+    "/api/auth", "/api/users",       // Phase 1–3
+    "/api/vendors", "/api/settings",    // Phase 4–5
+    "/api/audit", "/api/quality",     // Phase 6–7
+    "/api/ingest",                      // ingest routes
+    "/api/invitations",                  // invitation routes
+  ];
+
   app.all(/^\/api(\/|$)/, (req, res, next) => {
-    if (req.path.startsWith("/api/onboard")) return next();
-    if (req.path.startsWith("/api/v1")) return next();  // ingest & keys API
+    if (knownApiPrefixes.some(p => req.path.startsWith(p))) return next();
     return res.status(404).json({
       ok: false,
       message:
-        "This backend does not use '/api'. Call unprefixed routes like /products, /customers, /jobs, /metrics, /health, /onboard.",
+        "Unknown /api route. Known prefixes: " + knownApiPrefixes.join(", "),
       path: req.path,
     });
   });
@@ -122,6 +133,7 @@ export default app;
   // Single onboarding implementation source.
   app.use("/onboard", onboardRouter);
   app.use("/api/onboard", onboardRouter);
+  app.use("/api/invitations", invitationsRouter);
 
   await registerRoutes(app);
 
@@ -134,11 +146,11 @@ export default app;
   }
 
   server.listen(PORT, HOST, () => {
-    console.log(`Listening on http://${HOST}:${PORT}`);
+    logger.info(`Listening on http://${HOST}:${PORT}`);
     if (isDev) {
-      console.log("CORS (dev): allowing any http(s)://localhost:* and http(s)://127.0.0.1:*");
+      logger.info("CORS (dev): allowing any http(s)://localhost:* and http(s)://127.0.0.1:*");
     } else {
-      console.log(`CORS (prod): ${configuredOrigins.length ? configuredOrigins.join(", ") : "(none)"}`);
+      logger.info(`CORS (prod): ${configuredOrigins.length ? configuredOrigins.join(", ") : "(none)"}`);
     }
 
   });
