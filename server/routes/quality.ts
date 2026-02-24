@@ -15,6 +15,7 @@ import {
     scoreAndUpsert,
     getVendorQualitySummary,
 } from "../services/quality-scoring.js";
+import { insertAlert } from "./alerts.js";
 
 const router = Router();
 
@@ -130,6 +131,19 @@ router.post(
             }
 
             const result = await scoreAndUpsert(productId, vendorId, undefined, auth?.userId ?? "manual");
+
+            // Insert a quality alert if the score drops below threshold
+            if (result.overallScore < 50) {
+                await insertAlert({
+                    vendorId,
+                    type: "quality",
+                    priority: result.overallScore < 20 ? "high" : "medium",
+                    title: `Low quality score (${result.overallScore}) for product ${productId}`,
+                    description: `Product rescored with grade ${scoreToGrade(result.overallScore)}. Missing fields: ${(result.missingFields || []).join(", ") || "none"}.`,
+                    sourceTable: "product_quality_scores",
+                    sourceId: productId,
+                });
+            }
 
             return res.json({
                 productId,
