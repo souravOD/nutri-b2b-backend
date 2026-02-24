@@ -36,6 +36,39 @@ function getVendorsCol() {
     return process.env.APPWRITE_VENDORS_COL || "";
 }
 
+// ── GET /vendors ────────────────────────────────────────────────────────────
+// Superadmin: returns all vendors; other roles: returns only their own vendor
+router.get(
+    "/",
+    requireAuth as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+
+            let result;
+            if (auth.role === "superadmin") {
+                result = await db.execute(sql`
+                    SELECT id, name, slug, status, created_at
+                    FROM gold.vendors
+                    ORDER BY name
+                `);
+            } else {
+                result = await db.execute(sql`
+                    SELECT id, name, slug, status, created_at
+                    FROM gold.vendors
+                    WHERE id = ${auth.vendorId}
+                    LIMIT 1
+                `);
+            }
+
+            return res.json({ data: result.rows ?? [] });
+        } catch (err: any) {
+            console.error("[vendors] GET / error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
 // ── GET /vendors/:vendorId/stats ────────────────────────────────────────────
 // Returns vendor detail with aggregate counts (products, users, customers, last ingestion)
 // Requires read:vendors permission
