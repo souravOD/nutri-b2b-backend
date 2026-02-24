@@ -330,6 +330,7 @@ async function ensureUserLink(params: {
     SELECT user_id, vendor_id, role, status
     FROM gold.b2b_user_links
     WHERE user_id = ${params.userId}::uuid
+      AND vendor_id = ${params.vendorId}::uuid
     LIMIT 1
   `);
 
@@ -364,6 +365,7 @@ async function ensureUserLink(params: {
       status = 'active',
       updated_at = now()
     WHERE user_id = ${params.userId}::uuid
+      AND vendor_id = ${params.vendorId}::uuid
     RETURNING user_id, vendor_id, role, status
   `);
   return upd.rows?.[0] as DbUserLinkRow;
@@ -544,11 +546,13 @@ router.post("/self", async (req: Request, res: Response) => {
     }
 
     console.error("[/onboard/self] error:", err?.message || err, err?.cause || "");
-    return jsonError(res, 500, "onboarding_failed", "Onboarding failed", {
-      message: err?.message || String(err),
-      cause: err?.cause || null,
-      trace,
-    });
+    return jsonError(res, 500, "onboarding_failed", "Onboarding failed",
+      isProd ? { trace } : {
+        message: err?.message || String(err),
+        cause: err?.cause || null,
+        trace,
+      }
+    );
   }
 });
 

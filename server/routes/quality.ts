@@ -10,7 +10,7 @@ import { Router, Request, Response } from "express";
 import { requireAuth, requirePermissionMiddleware } from "../lib/auth.js";
 import { productQualityScores } from "../../shared/schema.js";
 import { db } from "../lib/database.js";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
     scoreAndUpsert,
     getVendorQualitySummary,
@@ -117,6 +117,16 @@ router.post(
             }
             if (!vendorId) {
                 return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            // Verify the product belongs to this vendor
+            const ownershipCheck = await db.execute(sql`
+                SELECT 1 FROM gold.products
+                WHERE id = ${productId} AND vendor_id = ${vendorId}::uuid
+                LIMIT 1
+            `);
+            if (!ownershipCheck.rows?.length) {
+                return res.status(403).json({ code: "forbidden", detail: "Product does not belong to your vendor" });
             }
 
             const result = await scoreAndUpsert(productId, vendorId, undefined, auth?.userId ?? "manual");

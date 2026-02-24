@@ -6,10 +6,15 @@
  */
 import { Client, Teams, Users } from "node-appwrite";
 
-const ENDPOINT = "https://nyc.cloud.appwrite.io/v1";
-const PROJECT = "68ee72c9001ee9382faa";
-const API_KEY = "standard_65518be4a35d552e03b381cfc18f904918d3a66db777ff289338da5343d042f0329b89852bbd3a9a84c71155c81786966d5d6ca5b8128f336d65baeef4e0c5a6ffbdff35fb6fa0da81e33c74e76e6d7480c0d4d9f57ca90131cf1e9afcab6837b7ca39df4db6ff12fa82d9f77c643318daa91236984f4679059903a5d40fb3b6";
-const TARGET_EMAIL = "sourav.patil@odysseyts.com";
+const ENDPOINT = process.env.APPWRITE_ENDPOINT;
+const PROJECT = process.env.APPWRITE_PROJECT_ID;
+const API_KEY = process.env.APPWRITE_API_KEY;
+const TARGET_EMAIL = process.env.TARGET_EMAIL || "sourav.patil@odysseyts.com";
+
+if (!ENDPOINT || !PROJECT || !API_KEY) {
+    console.error("Missing required env vars: APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID, APPWRITE_API_KEY");
+    process.exit(1);
+}
 
 const client = new Client()
     .setEndpoint(ENDPOINT)

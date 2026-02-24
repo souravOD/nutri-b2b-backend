@@ -1377,8 +1377,12 @@ export function registerRoutes(app: Express) {
   // Upload CSV + trigger the orchestrator.
   // Returns the orchestration run_id for the frontend to poll.
   app.post("/jobs/upload",
-    uploadMw.single("file"),
     withAuth(async (req: any, res) => {
+      // Auth runs FIRST, then multer parses upload — prevents unauthenticated file uploads
+      await new Promise<void>((resolve, reject) => {
+        uploadMw.single("file")(req, res, (err: any) => err ? reject(err) : resolve());
+      });
+
       const vendorId = req.auth?.vendorId as string | undefined;
       if (!vendorId) return res.status(401).json({ message: "Missing vendor" });
 

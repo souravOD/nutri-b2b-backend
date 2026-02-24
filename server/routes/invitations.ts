@@ -406,10 +406,26 @@ router.post(
                 return problem(res, 404, "Invalid or expired invitation");
             }
 
-            // 2) Set password on the Appwrite Auth user
+            // 2) Validate userId belongs to the invitation email
             const adminClient = createAdminClient();
             const users = new Users(adminClient);
 
+            let appwriteUser;
+            try {
+                appwriteUser = await users.get(userId);
+            } catch {
+                return problem(res, 401, "Invalid user ID");
+            }
+            if (appwriteUser.email.toLowerCase() !== inv.email.toLowerCase()) {
+                return problem(res, 403, "User ID does not match invitation email");
+            }
+
+            // 3) Check invitation expiry
+            if (inv.expires_at && new Date(inv.expires_at) < new Date()) {
+                return problem(res, 410, "Invitation has expired");
+            }
+
+            // 4) Set password on the Appwrite Auth user
             await users.updatePassword(userId, password);
 
             // 3) Mark email as verified

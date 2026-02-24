@@ -76,6 +76,7 @@ async function buildApp() {
     "/api/vendors", "/api/settings",
     "/api/audit", "/api/quality",
     "/api/ingest",
+    "/api/invitations",
   ];
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {
