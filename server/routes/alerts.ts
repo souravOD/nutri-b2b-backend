@@ -191,7 +191,7 @@ export async function insertAlert(opts: {
                 ${opts.title.slice(0, 255)},
                 ${opts.description || null},
                 ${opts.sourceTable || null},
-                ${opts.sourceId ? sql`${opts.sourceId}::uuid` : sql`NULL`}
+                ${opts.sourceId ? sql`${opts.sourceId}::uuid` : null}
             )
             RETURNING id
         `);
