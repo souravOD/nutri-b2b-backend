@@ -185,7 +185,7 @@ router.post(
                     count(*) FILTER (WHERE nutrition IS NOT NULL AND nutrition::text != '{}')::int AS with_nutrition,
                     count(*) FILTER (WHERE allergens IS NOT NULL AND array_length(allergens, 1) > 0)::int AS with_allergens,
                     count(*) FILTER (WHERE ingredients IS NOT NULL AND array_length(ingredients, 1) > 0)::int AS with_ingredients,
-                    count(*) FILTER (WHERE barcode IS NOT NULL AND barcode != '')::int AS with_barcode,
+                    count(*) FILTER (WHERE barcode IS NOT NULL AND btrim(barcode) != '')::int AS with_barcode,
                     count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications
                 FROM gold.products
                 WHERE vendor_id = ${vendorId}::uuid AND status = 'active'
@@ -323,6 +323,9 @@ export function evaluateRule(
     } catch {
         // Malformed config — fall back to defaults
     }
+    // Normalize thresholds to sane values
+    compliantThreshold = Math.max(0, Math.min(100, compliantThreshold));
+    warningThreshold = Math.max(0, Math.min(compliantThreshold - 1, warningThreshold));
 
     let withField = 0;
     let known = true;

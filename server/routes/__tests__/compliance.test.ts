@@ -306,4 +306,16 @@ describe("evaluateRule()", () => {
         expect(result.score).toBe(95);
         expect(result.status).toBe("compliant");
     });
+
+    it("normalizes inverted thresholds (warning > compliant)", () => {
+        const rule = {
+            check_type: "nutrition_completeness",
+            check_config: { compliant_threshold: 50, warning_threshold: 80 },
+        };
+        const result = evaluateRule(rule, sampleStats, 100);
+        // compliant clamped to 50, warning clamped to min(49, 80)=49
+        // score=95 >= 50 → compliant
+        expect(result.score).toBe(95);
+        expect(result.status).toBe("compliant");
+    });
 });

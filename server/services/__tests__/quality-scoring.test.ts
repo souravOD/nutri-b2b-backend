@@ -262,4 +262,14 @@ describe("scoreToGrade()", () => {
     ] as [number, string][])("scoreToGrade(%i) → %s", (score, expected) => {
         expect(scoreToGrade(score)).toBe(expected);
     });
+
+    it("clamps scores above 100 to A", () => {
+        expect(scoreToGrade(150)).toBe("A");
+        expect(scoreToGrade(999)).toBe("A");
+    });
+
+    it("clamps scores below 0 to F", () => {
+        expect(scoreToGrade(-10)).toBe("F");
+        expect(scoreToGrade(-999)).toBe("F");
+    });
 });
