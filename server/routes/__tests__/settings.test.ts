@@ -156,6 +156,32 @@ describe("Settings Router", () => {
             expect(res.body.settings["notifications.health_alerts"].value).toBe(true);
         });
 
+        it("returns data array alongside settings object (for frontend loadSettings)", async () => {
+            mockExecute.mockResolvedValueOnce({
+                rows: [
+                    { key: "org.name", value: "TestOrg", updated_by: "u-1", updated_at: "2025-01-01T00:00:00Z" },
+                    { key: "pref.auto_matching", value: "true", updated_by: "u-1", updated_at: "2025-01-01T00:00:00Z" },
+                ],
+            });
+
+            const app = createApp(adminAuth);
+            const res = await request(app).get("/settings");
+
+            expect(res.status).toBe(200);
+            // settings object still present
+            expect(res.body.settings["org.name"].value).toBe("TestOrg");
+            // data array with key/value and setting_key/setting_value
+            expect(Array.isArray(res.body.data)).toBe(true);
+            expect(res.body.data).toHaveLength(2);
+            expect(res.body.data[0]).toEqual({
+                key: "org.name",
+                value: "TestOrg",
+                setting_key: "org.name",
+                setting_value: "TestOrg",
+            });
+            expect(res.body.data[1].key).toBe("pref.auto_matching");
+        });
+
         it("returns empty settings when none exist", async () => {
             mockExecute.mockResolvedValueOnce({ rows: [] });
 

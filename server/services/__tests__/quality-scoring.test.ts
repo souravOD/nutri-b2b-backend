@@ -242,3 +242,24 @@ describe("Quality Scoring Service", () => {
         });
     });
 });
+
+// ─── scoreToGrade (unit) ─────────────────────────────────────────────────────
+
+import { scoreToGrade } from "../quality-scoring.js";
+
+describe("scoreToGrade()", () => {
+    it.each([
+        [100, "A"],
+        [80, "A"],
+        [79, "B"],
+        [60, "B"],
+        [59, "C"],
+        [40, "C"],
+        [39, "D"],
+        [20, "D"],
+        [19, "F"],
+        [0, "F"],
+    ] as [number, string][])("scoreToGrade(%i) → %s", (score, expected) => {
+        expect(scoreToGrade(score)).toBe(expected);
+    });
+});

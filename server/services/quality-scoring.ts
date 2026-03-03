@@ -263,6 +263,15 @@ function clamp(v: number): number {
     return Math.max(0, Math.min(100, v));
 }
 
+/** Map a 0–100 quality score to a letter grade. */
+export function scoreToGrade(score: number): "A" | "B" | "C" | "D" | "F" {
+    if (score >= 80) return "A";
+    if (score >= 60) return "B";
+    if (score >= 40) return "C";
+    if (score >= 20) return "D";
+    return "F";
+}
+
 // ── DB helpers ────────────────────────────────────────────────
 
 /**
@@ -362,10 +371,27 @@ export async function getVendorQualitySummary(vendorId: string) {
         .from(productQualityScores)
         .where(sql`${productQualityScores.vendorId} = ${vendorId}`);
 
+    // Per-product scores for the products page quality column
+    const perProductRows = await db
+        .select({
+            productId: productQualityScores.productId,
+            overallScore: productQualityScores.overallScore,
+        })
+        .from(productQualityScores)
+        .where(sql`${productQualityScores.vendorId} = ${vendorId}`);
+
+    const byProduct: Record<string, { overallScore: number; grade: string }> = {};
+    for (const r of perProductRows) {
+        const s = r.overallScore ?? 0;
+        byProduct[r.productId] = { overallScore: s, grade: scoreToGrade(s) };
+    }
+
+    const avgOverall = row?.avgOverall ?? 0;
+
     return {
         totalProducts: row?.totalProducts ?? 0,
         averages: {
-            overall: row?.avgOverall ?? 0,
+            overall: avgOverall,
             completeness: row?.avgCompleteness ?? 0,
             accuracy: row?.avgAccuracy ?? 0,
             nutrition: row?.avgNutrition ?? 0,
@@ -380,5 +406,9 @@ export async function getVendorQualitySummary(vendorId: string) {
             D: row?.gradeD ?? 0,
             F: row?.gradeF ?? 0,
         },
+        // Aliases for dashboard/frontend consumption
+        averageScore: avgOverall,
+        overall_score: avgOverall,
+        byProduct,
     };
 }

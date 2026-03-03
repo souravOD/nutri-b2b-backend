@@ -220,3 +220,90 @@ describe("PATCH /compliance/checks/:id", () => {
         expect(res.body.code).toBe("not_found");
     });
 });
+
+// ─── evaluateRule (unit) ────────────────────────────────────────────────────
+
+import { evaluateRule } from "../compliance.js";
+
+const sampleStats = {
+    total_products: 100,
+    with_nutrition: 95,
+    with_allergens: 70,
+    with_ingredients: 80,
+    with_barcode: 40,
+    with_certifications: 50,
+};
+
+describe("evaluateRule()", () => {
+    it("returns compliant when score ≥ 90 (default threshold)", () => {
+        const rule = { check_type: "nutrition_completeness" };
+        const result = evaluateRule(rule, sampleStats, 100);
+        expect(result.score).toBe(95);
+        expect(result.status).toBe("compliant");
+        expect(result.productsChecked).toBe(100);
+        expect(result.productsFailed).toBe(5);
+    });
+
+    it("returns warning when 60 ≤ score < 90 (default threshold)", () => {
+        const rule = { check_type: "allergen_declaration" };
+        const result = evaluateRule(rule, sampleStats, 100);
+        expect(result.score).toBe(70);
+        expect(result.status).toBe("warning");
+    });
+
+    it("returns non_compliant when score < 60 (default threshold)", () => {
+        const rule = { check_type: "barcode_presence" };
+        const result = evaluateRule(rule, sampleStats, 100);
+        expect(result.score).toBe(40);
+        expect(result.status).toBe("non_compliant");
+    });
+
+    it("uses custom thresholds from check_config object", () => {
+        const rule = {
+            check_type: "allergen_declaration",
+            check_config: { compliant_threshold: 80, warning_threshold: 50 },
+        };
+        const result = evaluateRule(rule, sampleStats, 100);
+        // score=70, custom compliant≥80 → not compliant, custom warning≥50 → warning
+        expect(result.score).toBe(70);
+        expect(result.status).toBe("warning");
+    });
+
+    it("uses custom thresholds from check_config JSON string", () => {
+        const rule = {
+            check_type: "barcode_presence",
+            check_config: JSON.stringify({ compliant_threshold: 50, warning_threshold: 30 }),
+        };
+        const result = evaluateRule(rule, sampleStats, 100);
+        // score=40, custom compliant≥50→no, custom warning≥30→warning
+        expect(result.score).toBe(40);
+        expect(result.status).toBe("warning");
+    });
+
+    it("returns warning with score 0 for unknown check_type", () => {
+        const rule = { check_type: "some_future_check" };
+        const result = evaluateRule(rule, sampleStats, 100);
+        expect(result.score).toBe(0);
+        expect(result.status).toBe("warning");
+        expect(result.productsFailed).toBe(100);
+    });
+
+    it("returns compliant for zero products", () => {
+        const rule = { check_type: "nutrition_completeness" };
+        const result = evaluateRule(rule, {}, 0);
+        expect(result.score).toBe(100);
+        expect(result.status).toBe("compliant");
+        expect(result.productsChecked).toBe(0);
+    });
+
+    it("falls back to defaults with malformed check_config", () => {
+        const rule = {
+            check_type: "nutrition_completeness",
+            check_config: "not valid json {{{",
+        };
+        const result = evaluateRule(rule, sampleStats, 100);
+        // Falls back to 90/60 defaults; score=95 → compliant
+        expect(result.score).toBe(95);
+        expect(result.status).toBe("compliant");
+    });
+});

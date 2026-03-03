@@ -55,15 +55,22 @@ router.get(
             `);
 
             const settings: Record<string, any> = {};
+            const data: Array<{ key: string; value: any; setting_key: string; setting_value: any }> = [];
             for (const row of result.rows as any[]) {
                 settings[row.key] = {
                     value: row.value,
                     updatedBy: row.updated_by,
                     updatedAt: row.updated_at,
                 };
+                data.push({
+                    key: row.key,
+                    value: row.value,
+                    setting_key: row.key,
+                    setting_value: row.value,
+                });
             }
 
-            return res.json({ settings });
+            return res.json({ settings, data });
         } catch (err: any) {
             console.error("[settings] GET / error:", err?.message || err);
             return res.status(500).json({ code: "internal_error", detail: "Failed to fetch settings" });

@@ -185,10 +185,11 @@ router.post(
                     count(*) FILTER (WHERE nutrition IS NOT NULL AND nutrition::text != '{}')::int AS with_nutrition,
                     count(*) FILTER (WHERE allergens IS NOT NULL AND array_length(allergens, 1) > 0)::int AS with_allergens,
                     count(*) FILTER (WHERE ingredients IS NOT NULL AND array_length(ingredients, 1) > 0)::int AS with_ingredients,
-                    count(*) FILTER (WHERE barcode IS NOT NULL)::int AS with_barcode,
+                    count(*) FILTER (WHERE barcode IS NOT NULL AND barcode != '')::int AS with_barcode,
                     count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications
                 FROM gold.products
                 WHERE vendor_id = ${vendorId}::uuid AND status = 'active'
+                  AND soft_deleted_at IS NULL
             `);
             const stats = (productStats.rows?.[0] || {}) as any;
             const totalProducts = stats.total_products || 0;
@@ -298,7 +299,8 @@ router.patch(
 
 // ── Rule evaluation engine ──────────────────────────────────────────────────
 // Evaluates a compliance rule against aggregated product stats.
-function evaluateRule(
+// Exported for unit testing.
+export function evaluateRule(
     rule: any,
     stats: any,
     totalProducts: number,
@@ -307,7 +309,23 @@ function evaluateRule(
         return { score: 100, productsChecked: 0, productsFailed: 0, status: "compliant" };
     }
 
+    // Parse configurable thresholds from rule.check_config (defaults: 90/60)
+    let compliantThreshold = 90;
+    let warningThreshold = 60;
+    try {
+        const cfg = typeof rule.check_config === "string"
+            ? JSON.parse(rule.check_config)
+            : rule.check_config;
+        if (cfg && typeof cfg === "object") {
+            if (typeof cfg.compliant_threshold === "number") compliantThreshold = cfg.compliant_threshold;
+            if (typeof cfg.warning_threshold === "number") warningThreshold = cfg.warning_threshold;
+        }
+    } catch {
+        // Malformed config — fall back to defaults
+    }
+
     let withField = 0;
+    let known = true;
     switch (rule.check_type) {
         case "nutrition_completeness":
             withField = stats.with_nutrition || 0;
@@ -325,16 +343,21 @@ function evaluateRule(
             withField = stats.with_certifications || 0;
             break;
         default:
-            // Unknown check type — default to 100% compliant
-            return { score: 100, productsChecked: totalProducts, productsFailed: 0, status: "compliant" };
+            known = false;
+            break;
+    }
+
+    // Unknown check type — flag as warning so it's visible, not silently passing
+    if (!known) {
+        return { score: 0, productsChecked: totalProducts, productsFailed: totalProducts, status: "warning" };
     }
 
     const failed = totalProducts - withField;
     const score = Math.round((withField / totalProducts) * 100);
 
     let status: string;
-    if (score >= 90) status = "compliant";
-    else if (score >= 60) status = "warning";
+    if (score >= compliantThreshold) status = "compliant";
+    else if (score >= warningThreshold) status = "warning";
     else status = "non_compliant";
 
     return { score, productsChecked: totalProducts, productsFailed: failed, status };
