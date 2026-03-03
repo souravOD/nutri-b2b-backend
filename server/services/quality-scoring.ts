@@ -265,10 +265,11 @@ function clamp(v: number): number {
 
 /** Map a 0–100 quality score to a letter grade. */
 export function scoreToGrade(score: number): "A" | "B" | "C" | "D" | "F" {
-    if (score >= 80) return "A";
-    if (score >= 60) return "B";
-    if (score >= 40) return "C";
-    if (score >= 20) return "D";
+    const s = clamp(score);
+    if (s >= 80) return "A";
+    if (s >= 60) return "B";
+    if (s >= 40) return "C";
+    if (s >= 20) return "D";
     return "F";
 }
 
