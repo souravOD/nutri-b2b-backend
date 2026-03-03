@@ -23,3 +23,7 @@ Thumbs.db
 
 # Vercel local project files
 .vercel
+
+# Appwrite exports (sensitive data)
+appwrite-export - b2b/
+appwrite-export - b2b.zip
