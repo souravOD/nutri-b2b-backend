@@ -145,14 +145,10 @@ export const customers = gold.table("b2b_customers", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 
-  // Compatibility-layer fields
-  location: jsonb("location"),
+  // Compatibility-layer fields (gold 2 schema: custom_tags, product_notes only)
   customTags: text("custom_tags").array(),
   notes: text("notes"),
   productNotes: jsonb("product_notes").default(sql`'{}'::jsonb`),
-  searchTsv: text("search_tsv"),
-  createdBy: uuid("created_by"),
-  updatedBy: uuid("updated_by"),
 }, (table) => ({
   uniqueVendorExternal: uniqueIndex("idx_b2b_customers_vendor_external").on(table.vendorId, table.externalId),
 }));
@@ -178,21 +174,49 @@ export const customerHealthProfiles = gold.table("b2b_customer_health_profiles",
   targetSodiumMg: integer("target_sodium_mg"),
   targetSugarG: numeric("target_sugar_g", { precision: 5, scale: 2 }),
 
-  // Compatibility-layer fields
-  age: integer("age"),
-  gender: text("gender"),
-  conditions: text("conditions").array().default(sql`'{}'::text[]`),
-  dietGoals: text("diet_goals").array().default(sql`'{}'::text[]`),
-  macroTargets: jsonb("macro_targets").default(sql`'{}'::jsonb`),
-  avoidAllergens: text("avoid_allergens").array().default(sql`'{}'::text[]`),
-  tdeeCached: numeric("tdee_cached", { precision: 8, scale: 2 }),
-  derivedLimits: jsonb("derived_limits").default(sql`'{}'::jsonb`),
-
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
-  updatedBy: uuid("updated_by"),
 }, (table) => ({
   uniqueCustomer: uniqueIndex("b2b_customer_health_profiles_b2b_customer_id_key").on(table.customerId),
+}));
+
+// Junction tables for conditions, allergens, diet goals (gold 2 schema)
+export const customerHealthConditions = gold.table("b2b_customer_health_conditions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  conditionId: uuid("condition_id").notNull().references(() => healthConditions.id),
+  severity: varchar("severity", { length: 20 }),
+  diagnosisDate: date("diagnosis_date"),
+  notes: text("notes"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerCondition: uniqueIndex("idx_b2b_cust_conditions_unique").on(table.customerId, table.conditionId),
+}));
+
+export const customerAllergens = gold.table("b2b_customer_allergens", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  allergenId: uuid("allergen_id").notNull().references(() => taxAllergens.id),
+  severity: varchar("severity", { length: 20 }),
+  reactionDescription: text("reaction_description"),
+  diagnosisDate: date("diagnosis_date"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerAllergen: uniqueIndex("idx_b2b_cust_allergens_unique").on(table.customerId, table.allergenId),
+}));
+
+export const customerDietaryPreferences = gold.table("b2b_customer_dietary_preferences", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  dietId: uuid("diet_id").notNull().references(() => taxTags.id),
+  strictness: varchar("strictness", { length: 20 }).default("moderate"),
+  startDate: date("start_date"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerDiet: uniqueIndex("idx_b2b_cust_diets_unique").on(table.customerId, table.dietId),
 }));
 
 export const vendorMappings = gold.table("b2b_vendor_mappings", {
@@ -581,7 +605,7 @@ export const insertVendorSchema = createInsertSchema(vendors).omit({ id: true, c
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertUserLinkSchema = createInsertSchema(userLinks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertProductSchema = createInsertSchema(products).omit({ id: true, createdAt: true, updatedAt: true, searchTsv: true });
-export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true, updatedAt: true, searchTsv: true });
+export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCustomerHealthProfileSchema = createInsertSchema(customerHealthProfiles).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertIngestionJobSchema = createInsertSchema(ingestionJobs).omit({ id: true, createdAt: true });
 export const insertWebhookEndpointSchema = createInsertSchema(webhookEndpoints).omit({ id: true, createdAt: true, updatedAt: true });

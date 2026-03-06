@@ -48,11 +48,12 @@ export function calculateBMI(weightKg: number, heightCm: number): number {
 
 // Derive daily nutrient limits based on health conditions
 export function deriveDailyLimits(
-  profile: Partial<CustomerHealthProfile>,
+  profile: Partial<CustomerHealthProfile> & { tdeeCached?: string | null; tdee?: string | number | null },
   conditionRules: any[] = []
 ): Record<string, any> {
+  const tdeeVal = profile.tdee ?? profile.tdeeCached ?? 2000;
   const baseLimits = {
-    calories: Number(profile.tdeeCached || 2000),
+    calories: Number(tdeeVal),
     sodium: 2300, // mg
     sugar: 50, // g
     saturatedFat: 20, // g
@@ -93,7 +94,7 @@ export function calculateHealthMetrics(
   const tdee = calculateTDEE(bmr, profile.activityLevel || 'sedentary');
 
   const derivedLimits = deriveDailyLimits(
-    { ...profile, tdeeCached: String(tdee) as any },
+    { ...profile, tdee: String(tdee) },
     conditionRules
   );
 

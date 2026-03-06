@@ -6,16 +6,46 @@ import {
   products,
   customers,
   customerHealthProfiles,
+  customerHealthConditions,
+  customerAllergens,
+  customerDietaryPreferences,
+  healthConditions,
+  taxAllergens,
+  taxTags,
   ingestionJobs,
   matchesCache,
   type InsertCustomerHealthProfile,
 } from "../shared/schema.js";
 import { db } from "./lib/database.js";
 import { and, desc, eq, count, sql } from "drizzle-orm";
-import { calculateHealthMetrics } from "./lib/health.js";
+import { calculateHealthMetrics, deriveDailyLimits } from "./lib/health.js";
+import { resolveConditionIds, resolveAllergenIds, resolveDietIds } from "./lib/taxonomy.js";
+
+/** Flatten taxonomy input: accept string[] or { code?, label?, conditionCode? }[] and return unique non-empty strings for resolver */
+function flattenTaxonomyInput(arr: (string | { code?: string; label?: string; conditionCode?: string })[]): string[] {
+  if (!Array.isArray(arr)) return [];
+  const result: string[] = [];
+  for (const item of arr) {
+    if (typeof item === "string" && item.trim()) result.push(item.trim());
+    else if (item && typeof item === "object") {
+      const code = (item as any).conditionCode ?? (item as any).code;
+      const label = (item as any).label;
+      if (code && typeof code === "string") result.push(code.trim());
+      if (label && typeof label === "string") result.push(label.trim());
+    }
+  }
+  return [...new Set(result)].filter(Boolean);
+}
 
 export type Product = typeof products.$inferSelect;
 export type InsertProduct = typeof products.$inferInsert;
+
+/** Build Postgres text[] literal from string array */
+function toTextArray(arr: string[] | undefined): ReturnType<typeof sql> {
+  const a = (arr ?? []).filter(Boolean);
+  if (a.length === 0) return sql`ARRAY[]::text[]`;
+  return sql`ARRAY[${sql.join(a.map((x) => sql`${x}`), sql`, `)}]::text[]`;
+}
 
 export type Customer = typeof customers.$inferSelect;
 export type InsertCustomer = typeof customers.$inferInsert;
@@ -111,6 +141,7 @@ export interface IStorage {
   deleteProduct(id: string, vendorId: string): Promise<boolean>;
 
   getCustomers(vendorId: string, filters?: any): Promise<Customer[]>;
+  getCustomersWithHealth(vendorId: string, filters?: any): Promise<(Customer & { healthProfile?: { dietGoals: string[]; avoidAllergens: string[]; conditions: string[] } | null })[]>;
   getCustomer(id: string, vendorId: string): Promise<Customer | undefined>;
   createCustomers(customers: InsertCustomer[]): Promise<Customer[]>;
   updateCustomer(id: string, vendorId: string, updates: Partial<InsertCustomer>): Promise<Customer | undefined>;
@@ -229,8 +260,7 @@ export class DatabaseStorage implements IStorage {
     const where: any[] = [sql`vendor_id = ${vendorId}`];
     if (status) where.push(sql`status = ${status}`);
 
-    const out = await db.execute(sql`
-      SELECT
+    const baseCols = sql`
         id,
         vendor_id AS "vendorId",
         external_id AS "externalId",
@@ -238,6 +268,9 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
@@ -247,21 +280,58 @@ export class DatabaseStorage implements IStorage {
         product_url AS "sourceUrl",
         notes,
         status,
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
-      FROM gold.products
-      WHERE ${sql.join(where, sql` AND `)}
-      ORDER BY updated_at DESC
-      LIMIT ${pageSize}
-      OFFSET ${offset}
-    `);
+    `;
+    const extendedCols = sql`
+        image_url AS "imageUrl",
+        calories,
+        total_fat_g AS "totalFatG",
+        saturated_fat_g AS "saturatedFatG",
+        sodium_mg AS "sodiumMg",
+        total_carbs_g AS "totalCarbsG",
+        total_sugars_g AS "totalSugarsG",
+        added_sugars_g AS "addedSugarsG",
+        protein_g AS "proteinG",
+        dietary_fiber_g AS "dietaryFiberG",
+        potassium_mg AS "potassiumMg",
+        phosphorus_mg AS "phosphorusMg"
+    `;
+
+    let out: { rows?: any[] };
+    try {
+      out = await db.execute(sql`
+        SELECT ${baseCols}, ${extendedCols}
+        FROM gold.products
+        WHERE ${sql.join(where, sql` AND `)}
+        ORDER BY updated_at DESC
+        LIMIT ${pageSize}
+        OFFSET ${offset}
+      `);
+    } catch (e: any) {
+      if (e?.message?.includes?.("does not exist")) {
+        out = await db.execute(sql`
+          SELECT ${baseCols}
+          FROM gold.products
+          WHERE ${sql.join(where, sql` AND `)}
+          ORDER BY updated_at DESC
+          LIMIT ${pageSize}
+          OFFSET ${offset}
+        `);
+      } else throw e;
+    }
 
     return (out.rows || []) as Product[];
   }
 
   async getProduct(id: string, vendorId: string): Promise<Product | undefined> {
-    const out = await db.execute(sql`
-      SELECT
+    const baseCols = sql`
         id,
         vendor_id AS "vendorId",
         external_id AS "externalId",
@@ -269,6 +339,9 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
@@ -278,12 +351,48 @@ export class DatabaseStorage implements IStorage {
         product_url AS "sourceUrl",
         notes,
         status,
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
-      FROM gold.products
-      WHERE id = ${id} AND vendor_id = ${vendorId}
-      LIMIT 1
-    `);
+    `;
+    const extendedCols = sql`
+        image_url AS "imageUrl",
+        calories,
+        total_fat_g AS "totalFatG",
+        saturated_fat_g AS "saturatedFatG",
+        sodium_mg AS "sodiumMg",
+        total_carbs_g AS "totalCarbsG",
+        total_sugars_g AS "totalSugarsG",
+        added_sugars_g AS "addedSugarsG",
+        protein_g AS "proteinG",
+        dietary_fiber_g AS "dietaryFiberG",
+        potassium_mg AS "potassiumMg",
+        phosphorus_mg AS "phosphorusMg"
+    `;
+
+    let out: { rows?: any[] };
+    try {
+      out = await db.execute(sql`
+        SELECT ${baseCols}, ${extendedCols}
+        FROM gold.products
+        WHERE id = ${id} AND vendor_id = ${vendorId}
+        LIMIT 1
+      `);
+    } catch (e: any) {
+      if (e?.message?.includes?.("does not exist")) {
+        out = await db.execute(sql`
+          SELECT ${baseCols}
+          FROM gold.products
+          WHERE id = ${id} AND vendor_id = ${vendorId}
+          LIMIT 1
+        `);
+      } else throw e;
+    }
     return (out.rows?.[0] as Product | undefined) ?? undefined;
   }
 
@@ -292,6 +401,9 @@ export class DatabaseStorage implements IStorage {
     const created: Product[] = [];
 
     for (const p of productList) {
+      const nutritionJson = p.nutrition && typeof p.nutrition === "object"
+        ? JSON.stringify(p.nutrition)
+        : null;
       const out = await db.execute(sql`
         INSERT INTO gold.products (
           vendor_id,
@@ -300,6 +412,9 @@ export class DatabaseStorage implements IStorage {
           brand,
           description,
           category_id,
+          sub_category_id,
+          cuisine_id,
+          market_id,
           barcode,
           gtin_type,
           price,
@@ -308,7 +423,13 @@ export class DatabaseStorage implements IStorage {
           package_weight,
           product_url,
           notes,
-          status
+          status,
+          nutrition,
+          dietary_tags,
+          allergens,
+          certifications,
+          regulatory_codes,
+          ingredients
         )
         VALUES (
           ${p.vendorId},
@@ -317,6 +438,9 @@ export class DatabaseStorage implements IStorage {
           ${p.brand ?? null},
           ${p.description ?? null},
           ${p.categoryId ?? null},
+          ${p.subCategoryId ?? null},
+          ${p.cuisineId ?? null},
+          ${p.marketId ?? null},
           ${p.barcode ?? null},
           ${p.gtinType ?? null},
           ${p.price ?? null},
@@ -325,7 +449,13 @@ export class DatabaseStorage implements IStorage {
           ${p.packageWeight ?? null},
           ${p.sourceUrl ?? null},
           ${p.notes ?? null},
-          ${toGoldProductStatus(p.status as any)}
+          ${toGoldProductStatus(p.status as any)},
+          ${nutritionJson}::jsonb,
+          ${toTextArray(p.dietaryTags ?? [])},
+          ${toTextArray(p.allergens ?? [])},
+          ${toTextArray(p.certifications ?? [])},
+          ${toTextArray(p.regulatoryCodes ?? [])},
+          ${toTextArray(p.ingredients ?? [])}
         )
         RETURNING
           id,
@@ -335,6 +465,9 @@ export class DatabaseStorage implements IStorage {
           brand,
           description,
           category_id AS "categoryId",
+          sub_category_id AS "subCategoryId",
+          cuisine_id AS "cuisineId",
+          market_id AS "marketId",
           barcode,
           gtin_type AS "gtinType",
           price,
@@ -344,6 +477,12 @@ export class DatabaseStorage implements IStorage {
           product_url AS "sourceUrl",
           notes,
           status,
+          nutrition,
+          dietary_tags AS "dietaryTags",
+          allergens,
+          certifications,
+          regulatory_codes AS "regulatoryCodes",
+          ingredients,
           created_at AS "createdAt",
           updated_at AS "updatedAt"
       `);
@@ -360,6 +499,9 @@ export class DatabaseStorage implements IStorage {
     if (updates.brand !== undefined) setParts.push(sql`brand = ${updates.brand}`);
     if (updates.description !== undefined) setParts.push(sql`description = ${updates.description}`);
     if (updates.categoryId !== undefined) setParts.push(sql`category_id = ${updates.categoryId}`);
+    if (updates.subCategoryId !== undefined) setParts.push(sql`sub_category_id = ${updates.subCategoryId}`);
+    if (updates.cuisineId !== undefined) setParts.push(sql`cuisine_id = ${updates.cuisineId}`);
+    if (updates.marketId !== undefined) setParts.push(sql`market_id = ${updates.marketId}`);
     if (updates.barcode !== undefined) setParts.push(sql`barcode = ${updates.barcode}`);
     if (updates.gtinType !== undefined) setParts.push(sql`gtin_type = ${updates.gtinType}`);
     if (updates.price !== undefined) setParts.push(sql`price = ${updates.price}`);
@@ -369,6 +511,17 @@ export class DatabaseStorage implements IStorage {
     if (updates.sourceUrl !== undefined) setParts.push(sql`product_url = ${updates.sourceUrl}`);
     if (updates.notes !== undefined) setParts.push(sql`notes = ${updates.notes}`);
     if (updates.status !== undefined) setParts.push(sql`status = ${toGoldProductStatus(updates.status as any)}`);
+    if (updates.nutrition !== undefined) {
+      const nutritionJson = updates.nutrition && typeof updates.nutrition === "object"
+        ? JSON.stringify(updates.nutrition)
+        : null;
+      setParts.push(sql`nutrition = ${nutritionJson}::jsonb`);
+    }
+    if (updates.dietaryTags !== undefined) setParts.push(sql`dietary_tags = ${toTextArray(updates.dietaryTags)}`);
+    if (updates.allergens !== undefined) setParts.push(sql`allergens = ${toTextArray(updates.allergens)}`);
+    if (updates.certifications !== undefined) setParts.push(sql`certifications = ${toTextArray(updates.certifications)}`);
+    if (updates.regulatoryCodes !== undefined) setParts.push(sql`regulatory_codes = ${toTextArray(updates.regulatoryCodes)}`);
+    if (updates.ingredients !== undefined) setParts.push(sql`ingredients = ${toTextArray(updates.ingredients)}`);
     setParts.push(sql`updated_at = now()`);
 
     const out = await db.execute(sql`
@@ -383,6 +536,9 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
@@ -392,6 +548,12 @@ export class DatabaseStorage implements IStorage {
         product_url AS "sourceUrl",
         notes,
         status,
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
     `);
@@ -440,7 +602,8 @@ export class DatabaseStorage implements IStorage {
         notes,
         created_at AS "createdAt",
         updated_at AS "updatedAt",
-        ARRAY[]::text[] AS "customTags"
+        COALESCE(custom_tags, ARRAY[]::text[]) AS "customTags",
+        COALESCE(product_notes, '{}'::jsonb) AS "productNotes"
       FROM gold.b2b_customers
       WHERE ${sql.join(where, sql` AND `)}
       ORDER BY updated_at DESC
@@ -449,6 +612,74 @@ export class DatabaseStorage implements IStorage {
     `);
 
     return (out.rows || []) as Customer[];
+  }
+
+  /** Like getCustomers but includes healthProfile with dietGoals, avoidAllergens, conditions from junction tables */
+  async getCustomersWithHealth(vendorId: string, filters?: any): Promise<(Customer & { healthProfile?: { dietGoals: string[]; avoidAllergens: string[]; conditions: string[] } | null })[]> {
+    const status = filters?.status ? toGoldCustomerStatus(filters.status) : null;
+    const pageSize = Math.min(200, Math.max(1, Number(filters?.pageSize ?? filters?.limit ?? 50) || 50));
+    const page = Math.max(1, Number(filters?.page ?? 1) || 1);
+    const offset = Number.isFinite(Number(filters?.offset))
+      ? Math.max(0, Number(filters.offset))
+      : (page - 1) * pageSize;
+
+    const where = status ? sql`c.vendor_id = ${vendorId} AND c.account_status = ${status}` : sql`c.vendor_id = ${vendorId}`;
+
+    const out = await db.execute(sql`
+      SELECT
+        c.id,
+        c.vendor_id AS "vendorId",
+        c.external_id AS "externalId",
+        c.global_customer_id AS "globalCustomerId",
+        c.email,
+        c.full_name AS "fullName",
+        c.first_name AS "firstName",
+        c.last_name AS "lastName",
+        c.date_of_birth AS "dob",
+        c.age,
+        c.gender,
+        c.phone,
+        c.location_country AS "locationCountry",
+        c.location_region AS "locationRegion",
+        c.location_city AS "locationCity",
+        c.location_postal_code AS "locationPostalCode",
+        c.account_status AS "accountStatus",
+        c.source_system AS "sourceSystem",
+        c.notes,
+        c.created_at AS "createdAt",
+        c.updated_at AS "updatedAt",
+        COALESCE(c.custom_tags, ARRAY[]::text[]) AS "customTags",
+        COALESCE(c.product_notes, '{}'::jsonb) AS "productNotes",
+        (SELECT COALESCE(array_agg(hc.name ORDER BY hc.name), ARRAY[]::text[])
+         FROM gold.b2b_customer_health_conditions chc
+         JOIN gold.health_conditions hc ON chc.condition_id = hc.id
+         WHERE chc.b2b_customer_id = c.id) AS "conditions",
+        (SELECT COALESCE(array_agg(a.name ORDER BY a.name), ARRAY[]::text[])
+         FROM gold.b2b_customer_allergens ca
+         JOIN gold.allergens a ON ca.allergen_id = a.id
+         WHERE ca.b2b_customer_id = c.id) AS "avoidAllergens",
+        (SELECT COALESCE(array_agg(dp.name ORDER BY dp.name), ARRAY[]::text[])
+         FROM gold.b2b_customer_dietary_preferences cdp
+         JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
+         WHERE cdp.b2b_customer_id = c.id) AS "dietGoals"
+      FROM gold.b2b_customers c
+      WHERE ${where}
+      ORDER BY c.updated_at DESC
+      LIMIT ${pageSize}
+      OFFSET ${offset}
+    `);
+
+    const rows = (out.rows || []) as any[];
+    return rows.map((r) => {
+      const { conditions, avoidAllergens, dietGoals, ...customer } = r;
+      return {
+        ...customer,
+        healthProfile:
+          (conditions?.length || avoidAllergens?.length || dietGoals?.length)
+            ? { conditions: conditions ?? [], avoidAllergens: avoidAllergens ?? [], dietGoals: dietGoals ?? [] }
+            : null,
+      };
+    });
   }
 
   async getCustomer(id: string, vendorId: string): Promise<Customer | undefined> {
@@ -475,7 +706,8 @@ export class DatabaseStorage implements IStorage {
         notes,
         created_at AS "createdAt",
         updated_at AS "updatedAt",
-        ARRAY[]::text[] AS "customTags"
+        COALESCE(custom_tags, ARRAY[]::text[]) AS "customTags",
+        COALESCE(product_notes, '{}'::jsonb) AS "productNotes"
       FROM gold.b2b_customers
       WHERE id = ${id} AND vendor_id = ${vendorId}
       LIMIT 1
@@ -499,9 +731,66 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
 
     if (!rows.length) return null;
+
+    const [conditionRows, allergenRows, dietRows] = await Promise.all([
+      db.select({ code: healthConditions.code, label: healthConditions.label })
+        .from(customerHealthConditions)
+        .innerJoin(healthConditions, eq(healthConditions.id, customerHealthConditions.conditionId))
+        .where(eq(customerHealthConditions.customerId, id)),
+      db.select({ code: taxAllergens.code, label: taxAllergens.label })
+        .from(customerAllergens)
+        .innerJoin(taxAllergens, eq(taxAllergens.id, customerAllergens.allergenId))
+        .where(eq(customerAllergens.customerId, id)),
+      db.select({ code: taxTags.code, label: taxTags.label })
+        .from(customerDietaryPreferences)
+        .innerJoin(taxTags, eq(taxTags.id, customerDietaryPreferences.dietId))
+        .where(eq(customerDietaryPreferences.customerId, id)),
+    ]);
+    const conditionCodes = conditionRows.map((x) => x.code);
+    const conditionLabels = conditionRows.map((x) => x.label ?? x.code);
+    const allergenLabels = allergenRows.map((x) => x.label ?? x.code);
+    const dietLabels = dietRows.map((x) => x.label ?? x.code);
+
+    const hp = rows[0].health;
+    const cust = rows[0].customer;
+    const hasJunctionData = conditionLabels.length > 0 || allergenLabels.length > 0 || dietLabels.length > 0;
+
+    const health = hp
+      ? (() => {
+          const tdee = hp.tdee ?? null;
+          const derivedLimits = deriveDailyLimits(
+            { ...hp, tdee, conditions: conditionCodes },
+            []
+          );
+          return {
+            ...hp,
+            age: cust.age ?? hp.age ?? undefined,
+            gender: cust.gender ?? hp.gender ?? undefined,
+            conditions: conditionLabels,
+            avoidAllergens: allergenLabels,
+            dietGoals: dietLabels,
+            derivedLimits,
+            macroTargets: {
+              protein_g: hp.targetProteinG ?? undefined,
+              carbs_g: hp.targetCarbsG ?? undefined,
+              fat_g: hp.targetFatG ?? undefined,
+              calories: hp.targetCalories ?? undefined,
+            },
+          };
+        })()
+      : hasJunctionData
+        ? {
+            age: cust.age ?? undefined,
+            gender: cust.gender ?? undefined,
+            conditions: conditionLabels,
+            avoidAllergens: allergenLabels,
+            dietGoals: dietLabels,
+          }
+        : null;
+
     return {
       ...rows[0].customer,
-      healthProfile: rows[0].health ?? null,
+      healthProfile: health,
     };
   }
 
@@ -524,6 +813,7 @@ export class DatabaseStorage implements IStorage {
     vendorId: string,
     patch: Partial<InsertCustomerHealthProfile>
   ): Promise<CustomerHealthProfile> {
+    const p = patch as any;
     const [cust] = await db
       .select({ id: customers.id, age: customers.age, gender: customers.gender })
       .from(customers)
@@ -532,99 +822,146 @@ export class DatabaseStorage implements IStorage {
 
     if (!cust) throw new Error("Customer not found");
 
-    const normalizedPatch: Partial<InsertCustomerHealthProfile> = {
-      ...patch,
-      activityLevel: toGoldActivityLevel((patch as any).activityLevel as string | null),
-      age: (patch as any).age ?? cust.age ?? undefined,
-      gender: toGoldGender((patch as any).gender ?? cust.gender ?? null),
-      heightCm: toNumericString((patch as any).heightCm),
-      weightKg: toNumericString((patch as any).weightKg),
-      bmi: toNumericString((patch as any).bmi),
-      bmr: toNumericString((patch as any).bmr),
-      tdeeCached: toNumericString((patch as any).tdeeCached),
-      conditions: Array.isArray((patch as any).conditions) ? (patch as any).conditions : undefined,
-      dietGoals: Array.isArray((patch as any).dietGoals) ? (patch as any).dietGoals : undefined,
-      avoidAllergens: Array.isArray((patch as any).avoidAllergens) ? (patch as any).avoidAllergens : undefined,
-      macroTargets: (patch as any).macroTargets ?? undefined,
-      derivedLimits: (patch as any).derivedLimits ?? undefined,
-    };
+    const activityLevel = toGoldActivityLevel(p.activityLevel as string | null);
+    const age = p.age ?? cust.age ?? null;
+    const gender = toGoldGender(p.gender ?? cust.gender ?? null);
+    const heightCm = toNumericString(p.heightCm);
+    const weightKg = toNumericString(p.weightKg);
+    const macroTargets = (p.macroTargets ?? {}) as Record<string, number>;
+    const conditions = Array.isArray(p.conditions) ? flattenTaxonomyInput(p.conditions) : [];
+    const dietGoals = Array.isArray(p.dietGoals) ? flattenTaxonomyInput(p.dietGoals) : [];
+    const avoidAllergens = Array.isArray(p.avoidAllergens) ? flattenTaxonomyInput(p.avoidAllergens) : [];
 
-    // Merge with existing profile so partial updates still recompute BMI/TDEE
     const [existingProfile] = await db.select()
       .from(customerHealthProfiles)
       .where(eq(customerHealthProfiles.customerId, customerId))
       .limit(1);
 
-    const effectiveHeight = normalizedPatch.heightCm ?? existingProfile?.heightCm ?? null;
-    const effectiveWeight = normalizedPatch.weightKg ?? existingProfile?.weightKg ?? null;
-    const effectiveAge = normalizedPatch.age ?? existingProfile?.age ?? cust.age ?? null;
+    const effectiveHeight = heightCm ?? existingProfile?.heightCm ?? null;
+    const effectiveWeight = weightKg ?? existingProfile?.weightKg ?? null;
+    const effectiveAge = age ?? cust.age ?? null;
 
-    const haveMetricsInputs =
+    let bmi: string | null = toNumericString(p.bmi);
+    let bmr: string | null = toNumericString(p.bmr);
+    let tdee: string | null = toNumericString(p.tdeeCached ?? p.tdee);
+
+    if (
       effectiveHeight != null &&
       effectiveWeight != null &&
-      effectiveAge != null;
-
-    if (haveMetricsInputs) {
+      effectiveAge != null
+    ) {
       const metrics = calculateHealthMetrics({
         heightCm: String(effectiveHeight),
         weightKg: String(effectiveWeight),
         age: Number(effectiveAge),
-        gender: (normalizedPatch.gender as any) ?? existingProfile?.gender ?? "prefer_not_to_say",
-        activityLevel: normalizedPatch.activityLevel ?? existingProfile?.activityLevel ?? "sedentary",
-        conditions: normalizedPatch.conditions ?? existingProfile?.conditions ?? [],
-        dietGoals: normalizedPatch.dietGoals ?? existingProfile?.dietGoals ?? [],
-        avoidAllergens: normalizedPatch.avoidAllergens ?? existingProfile?.avoidAllergens ?? [],
-        macroTargets: (normalizedPatch.macroTargets as any) ?? (existingProfile?.macroTargets as any) ?? {},
+        gender: gender ?? "prefer_not_to_say",
+        activityLevel: activityLevel ?? "sedentary",
+        conditions,
+        dietGoals,
+        avoidAllergens,
+        macroTargets,
       } as any);
-
-      normalizedPatch.bmi = String(metrics.bmi);
-      normalizedPatch.bmr = String(metrics.bmr);
-      normalizedPatch.tdeeCached = String(metrics.tdee);
-      normalizedPatch.derivedLimits = metrics.derivedLimits;
+      bmi = String(metrics.bmi);
+      bmr = String(metrics.bmr);
+      tdee = String(metrics.tdee);
     }
 
-    const [updated] = await db
-      .update(customerHealthProfiles)
-      .set({ ...normalizedPatch, updatedAt: sql`now()` })
-      .where(eq(customerHealthProfiles.customerId, customerId))
-      .returning();
-
-    if (updated) return updated;
-
-    const defaults: InsertCustomerHealthProfile = {
-      customerId,
-      heightCm: "0",
-      weightKg: "0",
-      activityLevel: "sedentary",
-      age: cust.age ?? 0,
-      gender: toGoldGender(cust.gender) ?? "prefer_not_to_say",
-      conditions: [],
-      dietGoals: [],
-      macroTargets: {},
-      avoidAllergens: [],
-      bmi: null,
-      bmr: null,
-      tdeeCached: null,
-      derivedLimits: {},
-      updatedBy: null,
-      healthGoal: null,
-      targetWeightKg: null,
-      targetCalories: null,
-      targetProteinG: null,
-      targetCarbsG: null,
-      targetFatG: null,
-      targetFiberG: null,
-      targetSodiumMg: null,
-      targetSugarG: null,
-      tdee: null,
+    const profilePayload: Partial<InsertCustomerHealthProfile> = {
+      heightCm: heightCm ?? existingProfile?.heightCm ?? "0",
+      weightKg: weightKg ?? existingProfile?.weightKg ?? "0",
+      activityLevel: activityLevel ?? existingProfile?.activityLevel ?? "sedentary",
+      bmi,
+      bmr,
+      tdee,
+      healthGoal: p.healthGoal ?? existingProfile?.healthGoal ?? null,
+      targetWeightKg: toNumericString(p.targetWeightKg ?? existingProfile?.targetWeightKg) ?? null,
+      targetCalories: macroTargets.calories ?? p.targetCalories ?? existingProfile?.targetCalories ?? null,
+      targetProteinG: toNumericString(macroTargets.protein_g ?? macroTargets.proteinG ?? p.targetProteinG ?? existingProfile?.targetProteinG) ?? null,
+      targetCarbsG: toNumericString(macroTargets.carbs_g ?? macroTargets.carbsG ?? p.targetCarbsG ?? existingProfile?.targetCarbsG) ?? null,
+      targetFatG: toNumericString(macroTargets.fat_g ?? macroTargets.fatG ?? p.targetFatG ?? existingProfile?.targetFatG) ?? null,
+      targetFiberG: toNumericString(p.targetFiberG ?? existingProfile?.targetFiberG) ?? null,
+      targetSodiumMg: p.targetSodiumMg ?? existingProfile?.targetSodiumMg ?? null,
+      targetSugarG: toNumericString(p.targetSugarG ?? existingProfile?.targetSugarG) ?? null,
     };
 
-    const [inserted] = await db
-      .insert(customerHealthProfiles)
-      .values({ ...defaults, ...normalizedPatch, customerId })
-      .returning();
+    const result = await db.transaction(async (tx) => {
+      if (age != null || gender != null) {
+        await tx.update(customers)
+          .set({
+            ...(age != null && { age: Number(age) }),
+            ...(gender != null && { gender }),
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)));
+      }
 
-    return inserted;
+      const [conditionIds, allergenIds, dietIds] = await Promise.all([
+        resolveConditionIds(conditions),
+        resolveAllergenIds(avoidAllergens),
+        resolveDietIds(dietGoals),
+      ]);
+
+      // [DEBUG] Log resolver outputs - empty when input non-empty indicates resolution failure
+      if (conditions.length || avoidAllergens.length || dietGoals.length) {
+        const resolutionFailed =
+          (conditions.length > 0 && conditionIds.length === 0) ||
+          (avoidAllergens.length > 0 && allergenIds.length === 0) ||
+          (dietGoals.length > 0 && dietIds.length === 0);
+        if (resolutionFailed) {
+          console.warn("[upsertCustomerHealth] taxonomy resolution returned empty for some inputs:", {
+            conditions,
+            conditionIds,
+            avoidAllergens,
+            allergenIds,
+            dietGoals,
+            dietIds,
+          });
+        }
+      }
+
+      await tx.delete(customerHealthConditions).where(eq(customerHealthConditions.customerId, customerId));
+      await tx.delete(customerAllergens).where(eq(customerAllergens.customerId, customerId));
+      await tx.delete(customerDietaryPreferences).where(eq(customerDietaryPreferences.customerId, customerId));
+
+      if (conditionIds.length > 0) {
+        await tx.insert(customerHealthConditions).values(
+          conditionIds.map((conditionId) => ({ customerId, conditionId }))
+        );
+      }
+      if (allergenIds.length > 0) {
+        await tx.insert(customerAllergens).values(
+          allergenIds.map((allergenId) => ({ customerId, allergenId }))
+        );
+      }
+      if (dietIds.length > 0) {
+        await tx.insert(customerDietaryPreferences).values(
+          dietIds.map((dietId) => ({ customerId, dietId }))
+        );
+      }
+
+      const [updated] = await tx
+        .update(customerHealthProfiles)
+        .set({ ...profilePayload, updatedAt: sql`now()` })
+        .where(eq(customerHealthProfiles.customerId, customerId))
+        .returning();
+
+      if (updated) return updated;
+
+      const [inserted] = await tx
+        .insert(customerHealthProfiles)
+        .values({
+          customerId,
+          ...profilePayload,
+          heightCm: profilePayload.heightCm ?? "0",
+          weightKg: profilePayload.weightKg ?? "0",
+          activityLevel: profilePayload.activityLevel ?? "sedentary",
+        })
+        .returning();
+
+      return inserted;
+    });
+
+    return result;
   }
 
   async createCustomerWithHealth(args: CreateCustomerWithHealthArgs) {
@@ -648,7 +985,6 @@ export class DatabaseStorage implements IStorage {
             age: customer.age ?? null,
             gender: toGoldGender(customer.gender) ?? null,
             accountStatus: toGoldCustomerStatus(customer.status),
-            updatedBy: userId,
             updatedAt: sql`now()`,
           })
           .where(and(eq(customers.id, existing[0].id), eq(customers.vendorId, vendorId)))
@@ -668,8 +1004,6 @@ export class DatabaseStorage implements IStorage {
             age: customer.age ?? null,
             gender: toGoldGender(customer.gender) ?? null,
             accountStatus: toGoldCustomerStatus(customer.status),
-            createdBy: userId,
-            updatedBy: userId,
           })
           .returning();
 
@@ -694,8 +1028,6 @@ export class DatabaseStorage implements IStorage {
         bmi: health.bmi,
         bmr: health.bmr,
         tdeeCached: health.tdeeCached,
-        derivedLimits: health.derivedLimits ?? {},
-        updatedBy: userId,
       });
     }
 
@@ -726,7 +1058,7 @@ export class DatabaseStorage implements IStorage {
 
     const [updated] = await db
       .update(customers)
-      .set({ productNotes: map as any, updatedAt: sql`now()`, updatedBy: userId as any })
+      .set({ productNotes: map as any, updatedAt: sql`now()` })
       .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
       .returning({ productNotes: customers.productNotes });
 
@@ -882,6 +1214,9 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
@@ -945,7 +1280,8 @@ export class DatabaseStorage implements IStorage {
         notes,
         created_at AS "createdAt",
         updated_at AS "updatedAt",
-        ARRAY[]::text[] AS "customTags"
+        COALESCE(custom_tags, ARRAY[]::text[]) AS "customTags",
+        COALESCE(product_notes, '{}'::jsonb) AS "productNotes"
       FROM gold.b2b_customers
       WHERE ${sql.join(where, sql` AND `)}
       ORDER BY updated_at DESC
@@ -965,6 +1301,9 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,

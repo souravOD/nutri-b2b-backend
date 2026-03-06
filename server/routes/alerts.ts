@@ -121,6 +121,36 @@ router.get(
     },
 );
 
+// ── POST /alerts/mark-all-read ──────────────────────────────────────────────
+// Mark all unread alerts for the vendor as read.
+router.post(
+    "/mark-all-read",
+    requireAuth as any,
+    requirePermissionMiddleware("write:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                UPDATE gold.b2b_alerts
+                SET status = 'read', read_at = now()
+                WHERE vendor_id = ${vendorId}::uuid AND status = 'unread'
+                RETURNING id
+            `);
+            const updated = result.rows?.length ?? 0;
+
+            return res.json({ ok: true, updated });
+        } catch (err: any) {
+            console.error("[alerts] POST /mark-all-read error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to mark alerts as read" });
+        }
+    },
+);
+
 // ── PATCH /alerts/:id ───────────────────────────────────────────────────────
 // Update alert status (read/dismissed). Sets read_at timestamp.
 router.patch(

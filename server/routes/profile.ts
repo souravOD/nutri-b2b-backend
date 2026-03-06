@@ -34,13 +34,15 @@ router.get(
             const appwriteUserId = auth.appwriteUserId;
             const userId = auth.userId;
 
-            // Fetch from gold.b2b_users (where profile extensions live)
+            // Fetch from gold.b2b_users (where profile extensions live) + vendor info
             const dbResult = await db.execute(sql`
                 SELECT u.id, u.appwrite_user_id, u.email, u.display_name,
                        u.phone, u.country, u.timezone,
-                       ul.vendor_id, ul.role
+                       ul.vendor_id, ul.role,
+                       v.name AS vendor_name, v.slug AS vendor_slug
                 FROM gold.b2b_users u
                 LEFT JOIN gold.b2b_user_links ul ON ul.user_id = u.id
+                LEFT JOIN gold.vendors v ON v.id = ul.vendor_id
                 WHERE u.id = ${userId}::uuid
                 LIMIT 1
             `);
@@ -73,6 +75,8 @@ router.get(
                 timezone: row.timezone || null,
                 vendorId: row.vendor_id || auth.vendorId,
                 role: row.role || auth.role,
+                vendorName: row.vendor_name || null,
+                vendorSlug: row.vendor_slug || null,
             });
         } catch (err: any) {
             console.error("[profile] GET / error:", err?.message || err);

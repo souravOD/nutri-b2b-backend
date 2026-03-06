@@ -6,12 +6,19 @@ import {
   products,
   customers,
   customerHealthProfiles,
+  customerHealthConditions,
+  customerAllergens,
+  customerDietaryPreferences,
+  healthConditions,
+  taxAllergens,
+  taxTags,
   vendors,
   matchesCache,
   dietRules,
 } from "../../shared/schema.js";
 import { and, eq, desc, sql } from "drizzle-orm";
 import { auditAction } from "../lib/audit.js";
+import { deriveDailyLimits } from "../lib/health.js";
 
 // Optional Redis (already in your repo)
 const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
@@ -141,24 +148,22 @@ export async function getMatchesForCustomer(
     .limit(1);
   if (dbCache[0]?.results) return { items: dbCache[0].results as any[], cached: true, catalogVersion };
 
-  // 4) Load profile + compile policy
-  const profile = (
-    await readDb
-      .select()
-      .from(customerHealthProfiles)
-      .where(eq(customerHealthProfiles.customerId, customerId))
-      .limit(1)
-  )[0];
+  // 4) Load profile + junction tables (conditions, allergens, diets)
+  const [profileRow, conditionRows, allergenRows, dietRows] = await Promise.all([
+    readDb.select().from(customerHealthProfiles).where(eq(customerHealthProfiles.customerId, customerId)).limit(1),
+    readDb.select({ code: healthConditions.code }).from(customerHealthConditions).innerJoin(healthConditions, eq(healthConditions.id, customerHealthConditions.conditionId)).where(eq(customerHealthConditions.customerId, customerId)),
+    readDb.select({ code: taxAllergens.code }).from(customerAllergens).innerJoin(taxAllergens, eq(taxAllergens.id, customerAllergens.allergenId)).where(eq(customerAllergens.customerId, customerId)),
+    readDb.select({ code: taxTags.code }).from(customerDietaryPreferences).innerJoin(taxTags, eq(taxTags.id, customerDietaryPreferences.dietId)).where(eq(customerDietaryPreferences.customerId, customerId)),
+  ]);
 
+  const profile = profileRow[0];
   if (!profile) {
     return { items: [], cached: false, catalogVersion };
   }
 
-  const avoidAllergens: string[] = (profile as any).avoidAllergens ?? [];
-  const preferredDiets: string[] = (profile as any).dietGoals ?? [];
-
-  // Vendor diet rules matching conditions[]
-  const conds: string[] = (profile as any).conditions ?? [];
+  const avoidAllergens: string[] = allergenRows.map((r) => r.code);
+  const preferredDiets: string[] = dietRows.map((r) => r.code);
+  const conds: string[] = conditionRows.map((r) => r.code);
   const rules = conds.length
     ? await readDb
         .select({ policy: dietRules.policy })
@@ -167,8 +172,11 @@ export async function getMatchesForCustomer(
     : [];
   const merged: Policy = mergePolicies(rules.map((r) => r.policy as Policy));
 
-  // existing limits
-  const derived = ((profile as any).derivedLimits ?? {}) as Limits;
+  // derived limits from tdee + conditions (computed on-the-fly)
+  const derived = deriveDailyLimits(
+    { ...profile, tdee: (profile as any).tdee, conditions: conds },
+    []
+  ) as Limits;
   const hardLimits: Limits = { ...(merged.hard_limits ?? {}), ...derived };
   const softLimits: Limits = { ...(merged.soft_limits ?? {}) };
 

@@ -55,4 +55,29 @@ export const api = {
     const res = await apiRequest("GET", "/metrics");
     return res.json();
   },
+
+  // Settings
+  async getSettings() {
+    const res = await apiRequest("GET", "/api/settings");
+    if (!res.ok) throw new Error(`Settings fetch failed: ${res.status}`);
+    return res.json();
+  },
+  async putSetting(key: string, value: unknown) {
+    const res = await apiRequest("PUT", `/api/settings/${encodeURIComponent(key)}`, { value });
+    if (!res.ok) throw new Error(`Settings save failed: ${res.status}`);
+    return res.json();
+  },
+
+  // Role Permissions
+  async getRolePermissions(vendorId?: string) {
+    const params = vendorId ? { vendor_id: vendorId } : undefined;
+    const res = await apiRequest("GET", `/api/role-permissions${qs(params)}`);
+    if (!res.ok) throw new Error(`Role permissions fetch failed: ${res.status}`);
+    return res.json();
+  },
+  async putRolePermissions(role: string, permissions: string[]) {
+    const res = await apiRequest("PUT", "/api/role-permissions", { role, permissions });
+    if (!res.ok) throw new Error(`Role permissions save failed: ${res.status}`);
+    return res.json();
+  },
 };

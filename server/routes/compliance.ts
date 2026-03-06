@@ -151,6 +151,71 @@ router.get(
     },
 );
 
+// ── GET /compliance/report ──────────────────────────────────────────────────
+// Export compliance check results as CSV
+router.get(
+    "/report",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT c.id, c.status, c.score, c.products_checked, c.products_failed,
+                       c.checked_at, c.next_review,
+                       r.title AS rule_title, r.regulation, r.severity
+                FROM gold.b2b_compliance_checks c
+                JOIN gold.b2b_compliance_rules r ON r.id = c.rule_id
+                WHERE c.vendor_id = ${vendorId}::uuid
+                ORDER BY c.checked_at DESC
+                LIMIT 500
+            `);
+
+            const rows = (result.rows || []) as any[];
+            const headers = ["Rule", "Regulation", "Status", "Score (%)", "Products Checked", "Products Failed", "Checked At", "Next Review"];
+            const escape = (s: string) => {
+                const str = String(s ?? "");
+                if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+                    return `"${str.replace(/"/g, '""')}"`;
+                }
+                return str;
+            };
+
+            const csvLines = [
+                headers.join(","),
+                ...rows.map((r) =>
+                    [
+                        escape(r.rule_title),
+                        escape(r.regulation),
+                        escape(r.status),
+                        escape(r.score),
+                        escape(r.products_checked),
+                        escape(r.products_failed),
+                        escape(r.checked_at ? new Date(r.checked_at).toISOString().slice(0, 10) : ""),
+                        escape(r.next_review ? new Date(r.next_review).toISOString().slice(0, 10) : ""),
+                    ].join(",")
+                ),
+            ];
+            const csv = csvLines.join("\n");
+
+            res.setHeader("Content-Type", "text/csv; charset=utf-8");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename="compliance-report-${new Date().toISOString().slice(0, 10)}.csv"`
+            );
+            return res.send(csv);
+        } catch (err: any) {
+            console.error("[compliance] GET /report error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to generate compliance report" });
+        }
+    },
+);
+
 // ── POST /compliance/run ────────────────────────────────────────────────────
 // Trigger compliance checks against vendor products for all active rules
 router.post(

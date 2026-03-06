@@ -20,7 +20,7 @@ import crypto from "crypto";
 import multer from "multer";
 import { db } from "../lib/database.js";
 import { sql, eq, and, desc } from "drizzle-orm";
-import { ingestionJobs, orchestrationRuns, pipelineRuns } from "../../shared/schema.js";
+import { ingestionJobs, ingestionJobErrors, orchestrationRuns, pipelineRuns } from "../../shared/schema.js";
 import { universalAuth } from "../middleware/api-key-auth.js";
 import {
     ingestProductsSchema,
@@ -578,6 +578,10 @@ router.get(
                         )
                     );
                 if (orchRun) {
+                    const totals = (orchRun.totals || {}) as Record<string, number>;
+                    const totalRecords = orchRun.totalRecordsProcessed ?? totals.processed ?? orchRun.totalRecordsWritten ?? 0;
+                    const successful = orchRun.totalRecordsWritten ?? totals.succeeded ?? 0;
+                    const errors = orchRun.totalErrors ?? totals.errors ?? 0;
                     return ok(res, {
                         id: orchRun.id,
                         mode: orchRun.sourceName || orchRun.flowName,
@@ -585,6 +589,9 @@ router.get(
                         progress_pct: orchRun.progressPct ?? 0,
                         totals: orchRun.totals,
                         bronze_records: orchRun.totalRecordsWritten ?? 0,
+                        total_records: totalRecords,
+                        successful,
+                        errors,
                         ingestion_run_id: orchRun.id,
                         started_at: orchRun.startedAt,
                         finished_at: orchRun.completedAt,
@@ -612,6 +619,21 @@ router.get(
                 // Bronze table may not have data yet
             }
 
+            let errorCount = 0;
+            try {
+                const [errRow] = await db
+                    .select({ count: sql<number>`count(*)::int` })
+                    .from(ingestionJobErrors)
+                    .where(eq(ingestionJobErrors.jobId, job.id));
+                errorCount = (errRow as any)?.count ?? 0;
+            } catch {
+                // ingestion_job_errors may not exist
+            }
+
+            const totals = (job.totals || {}) as Record<string, number>;
+            const totalRecords = totals.processed ?? bronzeCounts.total;
+            const successful = totals.succeeded ?? bronzeCounts.total;
+
             return ok(res, {
                 id: job.id,
                 mode: job.mode,
@@ -619,6 +641,9 @@ router.get(
                 progress_pct: job.progressPct,
                 totals: job.totals,
                 bronze_records: bronzeCounts.total,
+                total_records: totalRecords,
+                successful,
+                errors: totals.errors ?? errorCount,
                 ingestion_run_id: ingestionRunId,
                 started_at: job.startedAt,
                 finished_at: job.finishedAt,

@@ -32,6 +32,7 @@ export default app;
     "/api/compliance",                   // compliance checks
     "/api/profile",                      // user profile
     "/api/metrics",                      // metrics
+    "/api/config",                       // branding (public, no auth)
   ];
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {

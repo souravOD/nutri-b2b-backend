@@ -5,6 +5,7 @@ import invitationsRouter from "./routes/invitations.js";
 import usersRouter from "./routes/users.js";
 import vendorsRouter from "./routes/vendors.js";
 import settingsRouter from "./routes/settings.js";
+import rolePermissionsRouter from "./routes/role-permissions.js";
 import auditRouter from "./routes/audit.js";
 import qualityRouter from "./routes/quality.js";
 import alertsRouter from "./routes/alerts.js";
@@ -189,10 +190,43 @@ function toUiActivityLevel(activity?: string): "sedentary" | "light" | "moderate
   return "sedentary";
 }
 
+/** Build nutrition object from inline columns when nutrition jsonb is empty (gold 2.sql style). */
+function nutritionFromRow(row: any): Record<string, number> | null {
+  const n = row?.nutrition;
+  if (n && typeof n === "object" && Object.keys(n).length > 0) return n as Record<string, number>;
+  const toNum = (v: any) => (v != null && !Number.isNaN(Number(v)) ? Number(v) : undefined);
+  const cal = toNum(row?.calories);
+  const fat = toNum(row?.totalFatG ?? row?.total_fat_g);
+  const sat = toNum(row?.saturatedFatG ?? row?.saturated_fat_g);
+  const sod = toNum(row?.sodiumMg ?? row?.sodium_mg);
+  const carbs = toNum(row?.totalCarbsG ?? row?.total_carbs_g);
+  const sugar = toNum(row?.totalSugarsG ?? row?.total_sugars_g);
+  const added = toNum(row?.addedSugarsG ?? row?.added_sugars_g);
+  const protein = toNum(row?.proteinG ?? row?.protein_g);
+  const pot = toNum(row?.potassiumMg ?? row?.potassium_mg);
+  const phos = toNum(row?.phosphorusMg ?? row?.phosphorus_mg);
+  const out: Record<string, number> = {};
+  if (cal != null) out.calories = cal;
+  if (fat != null) out.fat_g = fat;
+  if (sat != null) out.saturated_fat_g = sat;
+  if (sod != null) out.sodium_mg = sod;
+  if (carbs != null) out.carbs_g = carbs;
+  if (sugar != null) out.sugar_g = sugar;
+  if (added != null) out.added_sugar_g = added;
+  if (protein != null) out.protein_g = protein;
+  if (pot != null) out.potassium_mg = pot;
+  if (phos != null) out.phosphorus_mg = phos;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function mapProductForApi(row: any) {
   if (!row) return row;
+  const nutrition = nutritionFromRow(row) ?? row.nutrition;
+  const { calories, totalFatG, saturatedFatG, sodiumMg, totalCarbsG, totalSugarsG, addedSugarsG, proteinG, potassiumMg, phosphorusMg, ...rest } = row;
   return {
-    ...row,
+    ...rest,
+    nutrition,
+    imageUrl: row.imageUrl ?? row.image_url ?? null,
     status: toUiProductStatus(row.status),
   };
 }
@@ -308,6 +342,7 @@ export function registerRoutes(app: Express) {
 
   // ── Settings ──
   app.use("/api/settings", settingsRouter);
+  app.use("/api/role-permissions", rolePermissionsRouter);
 
   // ── Audit Log ──
   app.use("/api/audit", auditRouter);
@@ -330,6 +365,33 @@ export function registerRoutes(app: Express) {
       status: "healthy",
       timestamp: new Date().toISOString(),
       version: process.env.npm_package_version ?? "dev",
+    });
+  });
+
+  // Public branding config (no auth) — used by login/register pages
+  // ?slug=xxx → resolve vendorName from gold.vendors; copyright is generic
+  app.get("/api/config/branding", async (req: Request, res: Response) => {
+    const slug = (req.query.slug as string)?.trim();
+    const GENERIC_COPYRIGHT = "© 2024. All rights reserved.";
+
+    let vendorName: string | null = null;
+
+    if (slug) {
+      const row = await db.execute(sql`
+        SELECT name FROM gold.vendors
+        WHERE lower(slug) = lower(${slug}) AND status = 'active'
+        LIMIT 1
+      `);
+      vendorName = (row.rows?.[0] as any)?.name?.trim() || null;
+    }
+
+    if (!vendorName) {
+      vendorName = (process.env.VENDOR_NAME ?? "").trim() || null;
+    }
+
+    ok(res, {
+      vendorName,
+      copyrightText: GENERIC_COPYRIGHT,
     });
   });
 
@@ -812,7 +874,9 @@ export function registerRoutes(app: Express) {
         return ok(res, Array.isArray(rows) ? rows.map(mapCustomerForApi) : []);
       }
 
-      const items = await s.getCustomers(vendorId, { page, pageSize: limit });
+      const items = typeof s.getCustomersWithHealth === "function"
+        ? await s.getCustomersWithHealth(vendorId, { page, pageSize: limit })
+        : await s.getCustomers(vendorId, { page, pageSize: limit });
       return ok(res, Array.isArray(items) ? items.map(mapCustomerForApi) : []);
     } catch (err: any) {
       return problem(res, 500, err?.message || "Failed to load customers", req);
@@ -835,8 +899,8 @@ export function registerRoutes(app: Express) {
     }
   }));
 
-  // GET /taxonomy/diets?top=10[&all=1]
-  app.get("/taxonomy/diets", withAuth(async (_req: any, res) => {
+  // GET /taxonomy/diets?top=10[&all=1] (public, read-only dropdown data)
+  app.get("/taxonomy/diets", async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -846,10 +910,10 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
-  }));
+  });
 
-  // GET /taxonomy/allergens?top=10[&all=1]
-  app.get("/taxonomy/allergens", withAuth(async (_req: any, res) => {
+  // GET /taxonomy/allergens?top=10[&all=1] (public, read-only dropdown data)
+  app.get("/taxonomy/allergens", async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -859,10 +923,10 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
-  }));
+  });
 
-  // GET /taxonomy/conditions?top=10[&all=1]
-  app.get("/taxonomy/conditions", withAuth(async (req: any, res) => {
+  // GET /taxonomy/conditions?top=10[&all=1] (public, read-only dropdown data)
+  app.get("/taxonomy/conditions", async (req: any, res) => {
     const top = Number.isFinite(+req.query.top) ? Math.max(1, +req.query.top) : 10;
     const all = String(req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -872,7 +936,44 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ conditionCode: r.condition_code, label: r.label })) });
+  });
+
+  // GET /taxonomy/debug (auth) - list codes/names for allergens and conditions to verify DB data
+  app.get("/taxonomy/debug", withAuth(async (_req: any, res) => {
+    try {
+      const [allergens, conditions, diets] = await Promise.all([
+        db.execute(sql`SELECT code, name FROM gold.allergens ORDER BY name ASC LIMIT 50`),
+        db.execute(sql`SELECT code, name FROM gold.health_conditions ORDER BY name ASC LIMIT 50`),
+        db.execute(sql`SELECT code, name FROM gold.dietary_preferences ORDER BY name ASC LIMIT 50`),
+      ]);
+      return ok(res, {
+        allergens: (allergens.rows ?? []) as { code: string; name: string }[],
+        conditions: (conditions.rows ?? []) as { code: string; name: string }[],
+        diets: (diets.rows ?? []) as { code: string; name: string }[],
+      });
+    } catch (e: any) {
+      return problem(res, 500, e?.message ?? "Taxonomy debug failed", _req);
+    }
   }));
+
+  // GET /taxonomy/health-goals (public, read-only dropdown for Dietary Goals / health_goal)
+  app.get("/taxonomy/health-goals", async (_req: any, res) => {
+    const goals = [
+      { code: "weight_loss", label: "Weight Loss" },
+      { code: "muscle_gain", label: "Muscle Gain" },
+      { code: "keto", label: "Keto Diet" },
+      { code: "maintenance", label: "Weight Maintenance" },
+      { code: "heart_health", label: "Heart Health" },
+      { code: "diabetes_management", label: "Diabetes Management" },
+      { code: "low_sodium", label: "Low Sodium" },
+      { code: "high_protein", label: "High Protein" },
+      { code: "balanced", label: "Balanced Diet" },
+      { code: "paleo", label: "Paleo" },
+      { code: "mediterranean", label: "Mediterranean" },
+      { code: "plant_based", label: "Plant Based" },
+    ];
+    return ok(res, { data: goals });
+  });
 
   // UPDATE customer (profile fields)
   app.patch("/customers/:id", withAuth(async (req: any, res) => {
@@ -910,18 +1011,14 @@ export function registerRoutes(app: Express) {
       updates.accountStatus = toGoldCustomerStatus(b.status ?? b.account_status);
     }
 
-    // Location (jsonb)
+    // Location (map to individual columns; DB has no location jsonb)
     if (b.location && typeof b.location === "object") {
       const l = b.location;
-      updates.location = {
-        city: typeof l.city === "string" ? l.city.trim() : null,
-        state: typeof l.state === "string" ? l.state.trim() : null,
-        postal: typeof l.postal === "string" ? l.postal.trim() : null,
-        country: typeof l.country === "string" ? l.country.trim().toUpperCase() : null,
-      } as any;
+      if (typeof l.country === "string" && l.country.trim()) updates.locationCountry = l.country.trim().toUpperCase();
+      if (typeof l.state === "string" && l.state.trim()) updates.locationRegion = l.state.trim();
+      if (typeof l.city === "string" && l.city.trim()) updates.locationCity = l.city.trim();
+      if (typeof l.postal === "string" && l.postal.trim()) updates.locationPostalCode = l.postal.trim();
     }
-
-    if (req.auth?.userId) updates.updatedBy = req.auth.userId;
 
     // Debug logging removed (M1 fix — was leaking PII)
 
@@ -984,6 +1081,7 @@ export function registerRoutes(app: Express) {
       activityLevel: (b.activityLevel ?? b.activity_level) !== undefined
         ? toGoldActivityLevel(b.activityLevel ?? b.activity_level)
         : undefined,
+      healthGoal: typeof b.healthGoal === "string" && b.healthGoal.trim() ? b.healthGoal.trim() : undefined,
       conditions: Array.isArray(b.conditions) ? b.conditions : undefined,
       dietGoals: Array.isArray(b.dietGoals) ? b.dietGoals : undefined,
       macroTargets: b.macroTargets ?? b.macro_targets ?? undefined, // jsonb
@@ -992,7 +1090,6 @@ export function registerRoutes(app: Express) {
       bmr: toNum(b.bmr),
       tdeeCached: toNum(b.tdeeCached ?? b.tdee_cached),
       derivedLimits: b.derivedLimits ?? b.derived_limits ?? undefined,
-      updatedBy: userId,
     };
 
     // Drop only undefined (so 0 / empty-arrays still update)
@@ -1000,11 +1097,22 @@ export function registerRoutes(app: Express) {
       Object.entries(patch).filter(([, v]) => v !== undefined)
     );
 
+    // [DEBUG] Log dietary inputs before save
+    if (clean.conditions?.length || clean.avoidAllergens?.length || clean.dietGoals?.length) {
+      console.log("[PATCH /customers/:id/health] dietary inputs:", {
+        conditions: clean.conditions,
+        avoidAllergens: clean.avoidAllergens,
+        dietGoals: clean.dietGoals,
+      });
+    }
+
     try {
-      const row = await storage.upsertCustomerHealth(customerId, vendorId, clean);
+      await storage.upsertCustomerHealth(customerId, vendorId, clean);
+      const withProfile = await storage.getCustomerWithProfile(customerId, vendorId);
+      const hp = withProfile?.healthProfile;
       return res.status(200).json({
-        ...row,
-        activityLevel: toUiActivityLevel((row as any).activityLevel ?? (row as any).activity_level),
+        ...hp,
+        activityLevel: toUiActivityLevel((hp as any)?.activityLevel ?? (hp as any)?.activity_level),
       });
     } catch (e: any) {
       return problem(res, 400, e?.message ?? "Health update failed", req);
@@ -1046,6 +1154,7 @@ export function registerRoutes(app: Express) {
         activityLevel: toGoldActivityLevel(h.activityLevel ?? undefined),
         heightCm: h.heightCm !== undefined ? toStr(h.heightCm) : undefined, // numeric -> string
         weightKg: h.weightKg !== undefined ? toStr(h.weightKg) : undefined, // numeric -> string
+        healthGoal: typeof h.healthGoal === "string" && h.healthGoal.trim() ? h.healthGoal.trim() : undefined,
         conditions: Array.isArray(h.conditions) ? h.conditions : [],
         dietGoals: Array.isArray(h.dietGoals) ? h.dietGoals : [],
         avoidAllergens: Array.isArray(h.avoidAllergens) ? h.avoidAllergens : [],
@@ -1064,12 +1173,15 @@ export function registerRoutes(app: Express) {
         customer: customerInput,
         health: healthInput,
       });
+      // Return full profile with junction data (dietGoals, avoidAllergens, conditions)
+      const full = await storage.getCustomerWithProfile(created.customer.id, vendorId);
+      const merged = full ?? { ...created.customer, healthProfile: created.health };
       return res.status(201).json({
-        customer: mapCustomerForApi(created.customer),
-        health: created.health
+        customer: mapCustomerForApi(merged),
+        health: merged?.healthProfile
           ? {
-            ...created.health,
-            activityLevel: toUiActivityLevel((created.health as any).activityLevel),
+            ...merged.healthProfile,
+            activityLevel: toUiActivityLevel((merged.healthProfile as any).activityLevel ?? (merged.healthProfile as any).activity_level),
           }
           : null,
       });
