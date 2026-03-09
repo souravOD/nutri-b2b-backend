@@ -13,6 +13,9 @@
     "db:migrate:018": "tsx scripts/run-migration-018.ts",
     "db:migrate:019": "tsx scripts/run-migration-019.ts",
     "db:migrate:020": "tsx scripts/run-migration-020.ts",
+    "db:migrate:022": "tsx scripts/run-migration-022.ts",
+    "db:migrate:03gold": "npm run db:migrate:018 && npm run db:migrate:019 && npm run db:migrate:020 && npm run db:migrate:022",
+    "db:verify-schema": "tsx scripts/verify-schema.ts",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
     "smoke:ingestion": "tsx scripts/smoke-ingestion.ts"

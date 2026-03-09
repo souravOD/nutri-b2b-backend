@@ -144,16 +144,18 @@ router.put(
                 }
             }
 
-            // Audit log
+            // Audit log (03_gold.audit_log: table_name, record_id, action, old_values, new_values, changed_by, changed_at)
             try {
                 await db.execute(sql`
-                    INSERT INTO gold.audit_log (actor_id, action, entity_type, entity_id, diff)
+                    INSERT INTO gold.audit_log (table_name, record_id, action, old_values, new_values, changed_by, changed_at)
                     VALUES (
+                        'b2b_users',
                         ${userId}::uuid,
                         'profile_update',
-                        'user',
+                        '{}'::jsonb,
+                        ${JSON.stringify({ displayName, phone, country, timezone })}::jsonb,
                         ${userId}::uuid,
-                        ${JSON.stringify({ displayName, phone, country, timezone })}::jsonb
+                        now()
                     )
                 `);
             } catch {

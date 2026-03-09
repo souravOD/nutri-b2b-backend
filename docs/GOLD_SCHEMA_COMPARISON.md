@@ -77,14 +77,18 @@ Compares `gold 2.sql` (canonical schema) with B2B compatibility layer. Use this 
 
 ## Migration summary
 
-If your DB was created from **gold 2.sql**, run these to add B2B compatibility columns:
+If your DB was created from **gold 2.sql** or **03_gold.sql**, run these to add B2B compatibility columns:
 
 1. **018** — `sub_category_id`, `cuisine_id`, `market_id` on gold.products  
 2. **019** — `nutrition`, `dietary_tags`, `allergens`, `certifications`, `regulatory_codes`, `ingredients`, `notes`, `search_tsv`, `soft_deleted_at`, `product_url` on gold.products  
-3. **005** — compatibility columns on gold.vendors, gold.b2b_customers, gold.b2b_customer_health_profiles  
-4. **017** — any missing columns on gold.b2b_customers  
+3. **020** — `image_url`, `manufacturer`, `country_of_origin`, `global_product_id`, etc. on gold.products  
+4. **022** — `phone`, `country`, `timezone` on gold.b2b_users (Profile page)  
+5. **005** — compatibility columns on gold.vendors, gold.b2b_customers, gold.b2b_customer_health_profiles  
+6. **017** — any missing columns on gold.b2b_customers  
 
-Run order: 005 → 017 → 018 → 019 (005 creates gold schema/tables if needed; 017/018/019 add columns).
+Run order: 005 → 017 → 018 → 019 → 020 → 022 (005 creates gold schema/tables if needed; 017/018/019/020/022 add columns).
+
+**Quick run for 03_gold.sql alignment:** `npm run db:migrate:03gold`
 
 ---
 

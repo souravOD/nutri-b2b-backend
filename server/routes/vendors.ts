@@ -88,7 +88,7 @@ router.get(
 
             // Fetch vendor record
             const vendorResult = await db.execute(sql`
-                SELECT id, name, slug, status, catalog_version, api_endpoint,
+                SELECT id, name, slug, status, vendor_type, country, industry, catalog_version, api_endpoint,
                        contact_email, team_id, domains, owner_user_id, billing_email,
                        created_at, updated_at
                 FROM gold.vendors WHERE id = ${vendorId} LIMIT 1
@@ -125,6 +125,9 @@ router.get(
                     name: vendor.name,
                     slug: vendor.slug,
                     status: vendor.status,
+                    vendorType: vendor.vendor_type ?? null,
+                    country: vendor.country ?? null,
+                    industry: vendor.industry ?? null,
                     catalogVersion: vendor.catalog_version,
                     apiEndpoint: vendor.api_endpoint,
                     contactEmail: vendor.contact_email,
@@ -166,7 +169,7 @@ router.patch(
                 return res.status(403).json({ error: "Cannot update a different vendor" });
             }
 
-            const { name, contactEmail, billingEmail, apiEndpoint, domains } = req.body;
+            const { name, contactEmail, billingEmail, apiEndpoint, domains, vendorType, country, industry } = req.body;
 
             // Build SET clauses dynamically
             const setParts: any[] = [];
@@ -174,6 +177,9 @@ router.patch(
             if (contactEmail !== undefined) setParts.push(sql`contact_email = ${contactEmail}`);
             if (billingEmail !== undefined) setParts.push(sql`billing_email = ${billingEmail}`);
             if (apiEndpoint !== undefined) setParts.push(sql`api_endpoint = ${apiEndpoint}`);
+            if (vendorType !== undefined) setParts.push(sql`vendor_type = ${vendorType}`);
+            if (country !== undefined) setParts.push(sql`country = ${country}`);
+            if (industry !== undefined) setParts.push(sql`industry = ${industry}`);
             if (domains !== undefined && Array.isArray(domains)) {
                 setParts.push(sql`domains = ${sql`ARRAY[${sql.join(domains.map((d: string) => sql`${d}`), sql`, `)}]::text[]`}`);
             }
@@ -187,7 +193,7 @@ router.patch(
                 UPDATE gold.vendors
                 SET ${sql.join(setParts, sql`, `)}
                 WHERE id = ${vendorId}
-                RETURNING id, name, slug, status, contact_email, billing_email,
+                RETURNING id, name, slug, status, vendor_type, country, industry, contact_email, billing_email,
                           api_endpoint, domains, team_id, updated_at
             `);
 
@@ -227,6 +233,9 @@ router.patch(
                     name: updated.name,
                     slug: updated.slug,
                     status: updated.status,
+                    vendorType: updated.vendor_type ?? null,
+                    country: updated.country ?? null,
+                    industry: updated.industry ?? null,
                     contactEmail: updated.contact_email,
                     billingEmail: updated.billing_email,
                     apiEndpoint: updated.api_endpoint,
