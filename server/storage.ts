@@ -20,6 +20,7 @@ import { db } from "./lib/database.js";
 import { and, desc, eq, count, sql } from "drizzle-orm";
 import { calculateHealthMetrics, deriveDailyLimits } from "./lib/health.js";
 import { resolveConditionIds, resolveAllergenIds, resolveDietIds } from "./lib/taxonomy.js";
+import { toGoldProductStatus, toGoldCustomerStatus, toGoldActivityLevel } from "./lib/gold-mappers.js";
 
 /** Flatten taxonomy input: accept string[] or { code?, label?, conditionCode? }[] and return unique non-empty strings for resolver */
 function flattenTaxonomyInput(arr: (string | { code?: string; label?: string; conditionCode?: string })[]): string[] {
@@ -69,6 +70,10 @@ type CreateCustomerWithHealthArgs = {
     age?: number | null;
     gender?: string | null;
     status?: string | null;
+    locationCity?: string | null;
+    locationRegion?: string | null;
+    locationPostalCode?: string | null;
+    locationCountry?: string | null;
   };
   health?: {
     age?: number;
@@ -176,36 +181,12 @@ function toNumericString(v: any): string | null | undefined {
   return String(n);
 }
 
-function toGoldCustomerStatus(status?: string | null): "active" | "inactive" | "suspended" {
-  const s = String(status || "active").toLowerCase();
-  if (s === "archived") return "inactive";
-  if (s === "inactive") return "inactive";
-  if (s === "suspended") return "suspended";
-  return "active";
-}
-
-function toGoldProductStatus(status?: string | null): "active" | "discontinued" | "out_of_stock" {
-  const s = String(status || "active").toLowerCase();
-  if (s === "inactive" || s === "discontinued") return "discontinued";
-  if (s === "out_of_stock") return "out_of_stock";
-  return "active";
-}
-
 function toGoldGender(gender?: string | null): string | null {
   if (!gender) return null;
   const g = String(gender).toLowerCase();
   if (g === "unspecified") return "prefer_not_to_say";
   if (["male", "female", "other", "prefer_not_to_say"].includes(g)) return g;
   return "prefer_not_to_say";
-}
-
-function toGoldActivityLevel(activity?: string | null): string {
-  const a = String(activity || "sedentary").toLowerCase();
-  if (a === "light" || a === "lightly_active") return "lightly_active";
-  if (a === "moderate" || a === "moderately_active") return "moderately_active";
-  if (a === "very" || a === "very_active") return "very_active";
-  if (a === "extra" || a === "extra_active") return "extra_active";
-  return "sedentary";
 }
 
 export class DatabaseStorage implements IStorage {
@@ -975,6 +956,12 @@ export class DatabaseStorage implements IStorage {
         .limit(1);
 
       let row: Customer;
+      const locationUpdates: Record<string, any> = {};
+      if (customer.locationCity != null) locationUpdates.locationCity = customer.locationCity;
+      if (customer.locationRegion != null) locationUpdates.locationRegion = customer.locationRegion;
+      if (customer.locationPostalCode != null) locationUpdates.locationPostalCode = customer.locationPostalCode;
+      if (customer.locationCountry != null) locationUpdates.locationCountry = customer.locationCountry;
+
       if (existing[0]?.id) {
         const [updated] = await tx
           .update(customers)
@@ -985,6 +972,7 @@ export class DatabaseStorage implements IStorage {
             age: customer.age ?? null,
             gender: toGoldGender(customer.gender) ?? null,
             accountStatus: toGoldCustomerStatus(customer.status),
+            ...locationUpdates,
             updatedAt: sql`now()`,
           })
           .where(and(eq(customers.id, existing[0].id), eq(customers.vendorId, vendorId)))
@@ -1004,6 +992,10 @@ export class DatabaseStorage implements IStorage {
             age: customer.age ?? null,
             gender: toGoldGender(customer.gender) ?? null,
             accountStatus: toGoldCustomerStatus(customer.status),
+            ...(customer.locationCity != null && { locationCity: customer.locationCity }),
+            ...(customer.locationRegion != null && { locationRegion: customer.locationRegion }),
+            ...(customer.locationPostalCode != null && { locationPostalCode: customer.locationPostalCode }),
+            ...(customer.locationCountry != null && { locationCountry: customer.locationCountry }),
           })
           .returning();
 
@@ -1069,11 +1061,11 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async getCustomerProductNote(customerId: string, productId: string) {
+  async getCustomerProductNote(customerId: string, productId: string, vendorId: string) {
     const [row] = await db
       .select({ productNotes: customers.productNotes })
       .from(customers)
-      .where(eq(customers.id, customerId))
+      .where(and(eq(customers.id, customerId), eq(customers.vendorId, vendorId)))
       .limit(1);
 
     const map: Record<string, any> = (row?.productNotes as any) || {};

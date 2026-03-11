@@ -327,6 +327,134 @@ router.post(
     }
 );
 
+// ── GET /vendors/:vendorId/alerts ──────────────────────────────────────────
+// Phase 2: Last N alerts for this vendor (superadmin or own vendor)
+router.get(
+    "/:vendorId/alerts",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+            const limit = Math.min(parseInt(String(req.query.limit || "5"), 10) || 5, 20);
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view alerts for a different vendor" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, type, priority, title, description, status, created_at
+                FROM gold.b2b_alerts
+                WHERE vendor_id = ${vendorId}::uuid
+                ORDER BY created_at DESC
+                LIMIT ${limit}
+            `);
+
+            return res.json({
+                alerts: (result.rows ?? []).map((r: any) => ({
+                    id: r.id,
+                    type: r.type,
+                    priority: r.priority,
+                    title: r.title,
+                    description: r.description,
+                    status: r.status,
+                    createdAt: r.created_at,
+                })),
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/alerts error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
+// ── GET /vendors/:vendorId/runs ─────────────────────────────────────────────
+// Phase 2: Last N ingestion runs for this vendor (superadmin or own vendor)
+router.get(
+    "/:vendorId/runs",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+            const limit = Math.min(parseInt(String(req.query.limit || "5"), 10) || 5, 20);
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view runs for a different vendor" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, flow_name, status, started_at, completed_at, total_records_processed, total_records_written
+                FROM orchestration.orchestration_runs
+                WHERE vendor_id = ${vendorId}::uuid
+                ORDER BY started_at DESC NULLS LAST
+                LIMIT ${limit}
+            `);
+
+            return res.json({
+                runs: (result.rows ?? []).map((r: any) => ({
+                    id: r.id,
+                    flowName: r.flow_name,
+                    status: r.status,
+                    startedAt: r.started_at,
+                    completedAt: r.completed_at,
+                    totalRecordsProcessed: r.total_records_processed ?? 0,
+                    totalRecordsWritten: r.total_records_written ?? 0,
+                })),
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/runs error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
+// ── GET /vendors/:vendorId/config ────────────────────────────────────────────
+// Phase 2: Config summary (API keys, webhooks, IP allowlist counts)
+router.get(
+    "/:vendorId/config",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view config for a different vendor" });
+            }
+
+            const [apiKeysResult, webhooksResult, ipAllowlistResult] = await Promise.all([
+                db.execute(sql`
+                    SELECT COUNT(*)::int AS count FROM gold.api_keys
+                    WHERE vendor_id = ${vendorId}::uuid AND revoked_at IS NULL AND is_active = true
+                `),
+                db.execute(sql`
+                    SELECT COUNT(*)::int AS count FROM gold.b2b_webhooks
+                    WHERE vendor_id = ${vendorId}::uuid AND is_active = true
+                `),
+                db.execute(sql`
+                    SELECT COUNT(*)::int AS count FROM gold.b2b_ip_allowlist
+                    WHERE vendor_id = ${vendorId}::uuid AND is_active = true
+                `),
+            ]);
+
+            return res.json({
+                config: {
+                    apiKeyCount: (apiKeysResult.rows?.[0] as any)?.count ?? 0,
+                    webhookCount: (webhooksResult.rows?.[0] as any)?.count ?? 0,
+                    ipAllowlistCount: (ipAllowlistResult.rows?.[0] as any)?.count ?? 0,
+                },
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/config error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
 // ── POST /vendors/:vendorId/reactivate ──────────────────────────────────────
 // Reactivate a suspended vendor (superadmin only)
 router.post(

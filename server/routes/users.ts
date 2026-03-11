@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireAuth, requirePermissionMiddleware, requireRoleMiddleware, type AuthContext } from "../lib/auth.js";
 import { db } from "../lib/database.js";
+import { safeErrorDetail } from "../lib/safe-error.js";
 import { sql } from "drizzle-orm";
 import { Client, Databases, Query, Teams } from "node-appwrite";
 
@@ -129,7 +130,7 @@ router.get(
             return res.json({ data });
         } catch (err: any) {
             console.error("[GET /users]", err);
-            return problem(res, 500, err?.message || "Failed to list users");
+            return problem(res, 500, safeErrorDetail(err, "Failed to list users"));
         }
     }
 );
@@ -192,7 +193,7 @@ router.get(
             return res.json({ user: result.rows![0] });
         } catch (err: any) {
             console.error("[GET /users/:userId]", err);
-            return problem(res, 500, err?.message || "Failed to get user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to get user"));
         }
     }
 );
@@ -311,7 +312,7 @@ router.patch(
             return res.json({ userId, role, updated: true });
         } catch (err: any) {
             console.error("[PATCH /users/:userId/role]", err);
-            return problem(res, 500, err?.message || "Failed to update role");
+            return problem(res, 500, safeErrorDetail(err, "Failed to update role"));
         }
     }
 );
@@ -386,7 +387,7 @@ router.delete(
             return res.json({ userId, deactivated: true });
         } catch (err: any) {
             console.error("[DELETE /users/:userId]", err);
-            return problem(res, 500, err?.message || "Failed to deactivate user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to deactivate user"));
         }
     }
 );
@@ -447,7 +448,7 @@ router.post(
             return res.json({ userId, role: "superadmin", promoted: true });
         } catch (err: any) {
             console.error("[POST /users/:userId/promote-superadmin]", err);
-            return problem(res, 500, err?.message || "Failed to promote user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to promote user"));
         }
     }
 );
@@ -508,7 +509,7 @@ router.post(
             return res.json({ userId, role: "vendor_admin", demoted: true });
         } catch (err: any) {
             console.error("[POST /users/:userId/demote-superadmin]", err);
-            return problem(res, 500, err?.message || "Failed to demote user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to demote user"));
         }
     }
 );

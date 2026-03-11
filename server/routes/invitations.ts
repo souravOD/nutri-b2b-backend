@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { randomUUID, randomBytes } from "crypto";
 import { requireAuth, requirePermissionMiddleware, type AuthContext } from "../lib/auth.js";
 import { db } from "../lib/database.js";
+import { safeErrorDetail } from "../lib/safe-error.js";
 import { sql } from "drizzle-orm";
 import { Client, Databases, ID, Query, Teams, Users } from "node-appwrite";
 
@@ -75,7 +76,7 @@ router.get(
             return res.json({ invitations: result.rows || [] });
         } catch (err: any) {
             console.error("[GET /invitations]", err);
-            return problem(res, 500, err?.message || "Failed to list invitations");
+            return problem(res, 500, safeErrorDetail(err, "Failed to list invitations"));
         }
     }
 );
@@ -273,7 +274,7 @@ router.post(
             });
         } catch (err: any) {
             console.error("[POST /invitations]", err);
-            return problem(res, 500, err?.message || "Failed to create invitation");
+            return problem(res, 500, safeErrorDetail(err, "Failed to create invitation"));
         }
     }
 );
@@ -337,7 +338,7 @@ router.post(
             return res.json({ ok: true });
         } catch (err: any) {
             console.error("[POST /invitations/promote-to-owner]", err);
-            return problem(res, 500, err?.message || "Failed to promote to owner");
+            return problem(res, 500, safeErrorDetail(err, "Failed to promote to owner"));
         }
     }
 );
@@ -387,7 +388,7 @@ router.get(
             });
         } catch (err: any) {
             console.error("[GET /invitations/validate]", err);
-            return problem(res, 500, err?.message || "Failed to validate invitation");
+            return problem(res, 500, safeErrorDetail(err, "Failed to validate invitation"));
         }
     }
 );
@@ -565,7 +566,7 @@ router.post(
             });
         } catch (err: any) {
             console.error("[POST /invitations/set-password]", err);
-            return problem(res, 500, err?.message || "Failed to set password");
+            return problem(res, 500, safeErrorDetail(err, "Failed to set password"));
         }
     }
 );
@@ -622,7 +623,7 @@ router.patch(
             return res.json({ id, status: "revoked" });
         } catch (err: any) {
             console.error("[PATCH /invitations]", err);
-            return problem(res, 500, err?.message || "Failed to revoke invitation");
+            return problem(res, 500, safeErrorDetail(err, "Failed to revoke invitation"));
         }
     }
 );
@@ -669,7 +670,7 @@ router.delete(
             return res.json({ id, deleted: true });
         } catch (err: any) {
             console.error("[DELETE /invitations]", err);
-            return problem(res, 500, err?.message || "Failed to delete invitation");
+            return problem(res, 500, safeErrorDetail(err, "Failed to delete invitation"));
         }
     }
 );

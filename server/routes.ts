@@ -18,6 +18,7 @@ import * as schema from "../shared/schema.js";
 import { db } from "./lib/database.js";
 import { supabaseAdmin } from "./lib/supabase.js";     // service-role client
 import { triggerOrchestrator, getOrchestrationRunStatus, newRunId } from "./services/ingest-service.js";
+import { getCircuitStatus, ragSearch, ragRecommend, ragMatch, ragChat, ragProductIntel, ragSubstitutions, ragSafetyCheck, ragSearchSuggest } from "./services/ragClient.js";
 import { randomUUID } from "crypto";
 import {
   addCreatorAsTeamAdmin,
@@ -35,6 +36,8 @@ import {
   withSlugSuffix,
 } from "./lib/vendors.js";
 import { validateVendorRegistrationInput } from "./lib/validators/vendorRegistration.js";
+import { toGoldProductStatus, toGoldCustomerStatus, toGoldActivityLevel } from "./lib/gold-mappers.js";
+import { safeErrorDetail } from "./lib/safe-error.js";
 import multer from "multer";
 import { ensureBucket } from "./lib/supabase.js";
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -47,6 +50,24 @@ const uploadMw = multer({
 
 
 const MATCHING_ENABLED = process.env.B2B_ENABLE_MATCHING === "1";
+
+/** PRD-10: In-memory store for chat report data keyed by session_id (for session-based export) */
+const sessionReportStore = new Map<string, Record<string, unknown>[]>();
+
+function structuredDataToReportRows(sd: any): Record<string, unknown>[] {
+  if (!sd || typeof sd !== "object") return [];
+  if (Array.isArray(sd.rows) && Array.isArray(sd.columns)) {
+    return sd.rows.map((row: any[]) => {
+      const obj: Record<string, unknown> = {};
+      (sd.columns as string[]).forEach((col, i) => { obj[col] = row[i]; });
+      return obj;
+    });
+  }
+  if (Array.isArray(sd.items)) return sd.items;
+  if (Array.isArray(sd.products)) return sd.products;
+  if (Array.isArray(sd.customers)) return sd.customers;
+  return [];
+}
 
 
 // const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -147,38 +168,14 @@ const withScorePct = (p: any) => {
   return { ...p, _score: raw01, score_pct: pct };
 };
 
-function toGoldProductStatus(status?: string): "active" | "discontinued" | "out_of_stock" {
-  const s = String(status || "active").toLowerCase();
-  if (s === "inactive" || s === "discontinued") return "discontinued";
-  if (s === "out_of_stock") return "out_of_stock";
-  return "active";
-}
-
 function toUiProductStatus(status?: string): "active" | "inactive" {
   const s = String(status || "active").toLowerCase();
   return s === "active" ? "active" : "inactive";
 }
 
-function toGoldCustomerStatus(status?: string): "active" | "inactive" | "suspended" {
-  const s = String(status || "active").toLowerCase();
-  if (s === "archived") return "inactive";
-  if (s === "inactive") return "inactive";
-  if (s === "suspended") return "suspended";
-  return "active";
-}
-
 function toUiCustomerStatus(status?: string): "active" | "archived" {
   const s = String(status || "active").toLowerCase();
   return s === "active" ? "active" : "archived";
-}
-
-function toGoldActivityLevel(activity?: string): "sedentary" | "lightly_active" | "moderately_active" | "very_active" | "extra_active" {
-  const a = String(activity || "sedentary").toLowerCase();
-  if (a === "light" || a === "lightly_active") return "lightly_active";
-  if (a === "moderate" || a === "moderately_active") return "moderately_active";
-  if (a === "very" || a === "very_active") return "very_active";
-  if (a === "extra" || a === "extra_active") return "extra_active";
-  return "sedentary";
 }
 
 function toUiActivityLevel(activity?: string): "sedentary" | "light" | "moderate" | "very" | "extra" {
@@ -367,6 +364,300 @@ export function registerRoutes(app: Express) {
       version: process.env.npm_package_version ?? "dev",
     });
   });
+
+  // Admin endpoint for circuit breaker diagnostics (PRD-01)
+  app.get("/api/v1/admin/rag-status", withAuth(async (_req: any, res) => {
+    ok(res, getCircuitStatus());
+  }));
+
+  // Search suggestions (PRD-03): "Did You Mean?" query expansion
+  app.get("/api/v1/search/suggestions", withAuth(async (req: any, res) => {
+    const q = (req.query.q as string)?.trim();
+    const vendorId = req.auth?.vendorId;
+    if (!q || q.length < 3) return ok(res, { suggestions: [], entities_found: null });
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const ragResult = await ragSearchSuggest({ query: q, vendor_id: vendorId });
+    if (ragResult) return ok(res, ragResult);
+    ok(res, { suggestions: [], entities_found: null, fallback: true });
+  }));
+
+  // Graph-enhanced product search (PRD-03): POST /api/v1/search/products
+  app.post("/api/v1/search/products", withAuth(async (req: any, res) => {
+    try {
+      const vendorId = req.auth?.vendorId;
+      if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+      const b = req.body ?? {};
+      const query = (b.query as string)?.trim() || undefined;
+      const filters = (b.filters && typeof b.filters === "object") ? b.filters : {};
+      const limit = Math.min(200, Math.max(1, typeof b.limit === "number" ? b.limit : parseInt(String(b.limit || 20), 10) || 20));
+
+      const brand = filters.brand ?? filters.Brand;
+      const status = filters.status ?? filters.Status;
+      const category_id = filters.category_id ?? filters.categoryId ?? filters.CategoryId;
+
+      if (!query) {
+        return problem(res, 400, "query is required", req);
+      }
+
+      const s: any = storage as any;
+
+      // Same logic as GET /products when q is present: RAG first, then SQL fallback
+      const ragResult = await ragSearch({
+        query,
+        vendor_id: vendorId,
+        filters: { brand, status, category_id },
+        limit,
+      });
+
+      if (ragResult?.results?.length) {
+        const enriched: any[] = [];
+        for (const r of ragResult.results) {
+          const prod = await s.getProduct?.(r.id, vendorId);
+          if (prod) {
+            enriched.push({
+              ...mapProductForApi(prod),
+              _score: r.score,
+              _reasons: r.reasons ?? [],
+            });
+          }
+        }
+        return ok(res, {
+          results: enriched,
+          query_interpretation: ragResult.query_interpretation ?? null,
+        });
+      }
+
+      // SQL fallback
+      if (typeof s.searchProducts === "function") {
+        const itemsOrResult = await s.searchProducts(
+          vendorId,
+          query,
+          { brand, status, categoryId: category_id, page: 1, pageSize: limit }
+        );
+        const data = (itemsOrResult?.items ?? itemsOrResult) || [];
+        const arr = Array.isArray(data) ? data.map(mapProductForApi) : [];
+        return ok(res, {
+          results: arr.map((p: any) => ({ ...p, _score: null, _reasons: [] })),
+          query_interpretation: null,
+          fallback: true,
+        });
+      }
+
+      if (typeof s.getProducts === "function") {
+        const result = await s.getProducts(vendorId, { page: 1, pageSize: limit });
+        const data = Array.isArray(result) ? result.map(mapProductForApi) : [];
+        return ok(res, {
+          results: data.map((p: any) => ({ ...p, _score: null, _reasons: [] })),
+          query_interpretation: null,
+          fallback: true,
+        });
+      }
+
+      ok(res, { results: [], query_interpretation: null, fallback: true });
+    } catch (err: any) {
+      return problem(res, 500, safeErrorDetail(err, "Search failed"), req);
+    }
+  }));
+
+  // Safety check (PRD-07): product-customer safety analysis
+  const safetyCheckHandler = withAuth(async (req: any, res: Response) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const b = req.body ?? {};
+    const ragResult = await ragSafetyCheck({
+      vendor_id: vendorId,
+      product_ids: Array.isArray(b.product_ids) ? b.product_ids : b.product_ids ? [b.product_ids] : undefined,
+      customer_ids: Array.isArray(b.customer_ids) ? b.customer_ids : b.customer_ids ? [b.customer_ids] : undefined,
+    });
+
+    if (ragResult) return ok(res, ragResult);
+
+    ok(res, { conflicts: [], summary: "Safety check unavailable", fallback: true });
+  });
+
+  app.post("/api/v1/safety-check", safetyCheckHandler);
+  app.post("/api/v1/compliance/safety-check", safetyCheckHandler);
+
+  // Chat (PRD-05): RAG chatbot proxy
+  app.post("/api/v1/chat", withAuth(async (req: any, res) => {
+    const { message, session_id } = req.body ?? {};
+    const vendorId = req.auth?.vendorId;
+    const userId = req.auth?.appwriteUserId ?? req.auth?.userId;
+
+    if (!message?.trim()) {
+      return res.status(400).json({ error: "Message is required" });
+    }
+    if (!vendorId || !userId) {
+      return problem(res, 403, "Vendor or user context required", req);
+    }
+
+    const ragResult = await ragChat({
+      message: String(message).trim(),
+      vendor_id: vendorId,
+      user_id: userId,
+      session_id: session_id || null,
+    });
+
+    if (!ragResult) {
+      return ok(res, {
+        response: "The chat service is temporarily unavailable. Please try again in a moment.",
+        intent: null,
+        session_id: session_id ?? null,
+        fallback: true,
+      });
+    }
+
+    // PRD-10: Store report data for session-based export
+    const sid = ragResult.session_id ?? session_id;
+    if (sid && typeof sid === "string") {
+      const rows = Array.isArray(ragResult.report_data)
+        ? ragResult.report_data
+        : ragResult.structured_data
+          ? structuredDataToReportRows(ragResult.structured_data)
+          : [];
+      if (rows.length > 0) sessionReportStore.set(sid, rows);
+    }
+
+    ok(res, ragResult);
+  }));
+
+  // Health analytics summary (PRD-06): allergen/condition/diet distribution for vendor
+  app.get("/api/v1/analytics/health-summary", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    try {
+      const [allergens, conditions, diets, totalCustomers] = await Promise.all([
+        db.execute(sql`
+          SELECT a.name, COUNT(DISTINCT ca.b2b_customer_id)::int AS customer_count
+          FROM gold.b2b_customer_allergens ca
+          JOIN gold.allergens a ON ca.allergen_id = a.id
+          JOIN gold.b2b_customers c ON ca.b2b_customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+          GROUP BY a.name ORDER BY customer_count DESC LIMIT 10
+        `),
+        db.execute(sql`
+          SELECT hc.name, COUNT(DISTINCT chc.b2b_customer_id)::int AS customer_count
+          FROM gold.b2b_customer_health_conditions chc
+          JOIN gold.health_conditions hc ON chc.condition_id = hc.id
+          JOIN gold.b2b_customers c ON chc.b2b_customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+          GROUP BY hc.name ORDER BY customer_count DESC LIMIT 10
+        `),
+        db.execute(sql`
+          SELECT dp.name, COUNT(DISTINCT cdp.b2b_customer_id)::int AS customer_count
+          FROM gold.b2b_customer_dietary_preferences cdp
+          JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
+          JOIN gold.b2b_customers c ON cdp.b2b_customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+          GROUP BY dp.name ORDER BY customer_count DESC LIMIT 10
+        `),
+        db.execute(sql`
+          SELECT COUNT(*)::int AS total FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid AND account_status = 'active'
+        `),
+      ]);
+
+      ok(res, {
+        allergen_distribution: (allergens.rows ?? []) as { name: string; customer_count: number }[],
+        health_condition_distribution: (conditions.rows ?? []) as { name: string; customer_count: number }[],
+        dietary_preference_distribution: (diets.rows ?? []) as { name: string; customer_count: number }[],
+        total_customers: (totalCustomers.rows?.[0] as any)?.total ?? 0,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Health summary failed"), req);
+    }
+  }));
+
+  // Analytics overview: aggregated metrics over time (product/customer growth, ingestion runs)
+  app.get("/api/v1/analytics/overview", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
+
+    try {
+      const [productTrend, customerTrend, runTrend, totals] = await Promise.all([
+        db.execute(sql`
+          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
+          FROM gold.products
+          WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `),
+        db.execute(sql`
+          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `),
+        db.execute(sql`
+          SELECT date_trunc('day', started_at)::date AS day, COUNT(*)::int AS count
+          FROM orchestration.orchestration_runs
+          WHERE vendor_id = ${vendorId}::uuid AND started_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `),
+        db.execute(sql`
+          SELECT
+            (SELECT COUNT(*)::int FROM gold.products WHERE vendor_id = ${vendorId}::uuid) AS products,
+            (SELECT COUNT(*)::int FROM gold.b2b_customers WHERE vendor_id = ${vendorId}::uuid AND account_status = 'active') AS customers,
+            (SELECT COUNT(*)::int FROM public.ingestion_jobs WHERE vendor_id = ${vendorId}::uuid AND status = 'completed') AS completed_jobs
+        `),
+      ]);
+
+      const totalRow = totals.rows?.[0] as any;
+      ok(res, {
+        productTrend: (productTrend.rows ?? []) as { day: string; count: number }[],
+        customerTrend: (customerTrend.rows ?? []) as { day: string; count: number }[],
+        runTrend: (runTrend.rows ?? []) as { day: string; count: number }[],
+        totals: {
+          products: totalRow?.products ?? 0,
+          customers: totalRow?.customers ?? 0,
+          completedJobs: totalRow?.completed_jobs ?? 0,
+        },
+        days,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Analytics overview failed"), req);
+    }
+  }));
+
+  // Chat report export (PRD-10): CSV download from report data or session
+  app.post("/api/v1/chat/export", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const b = req.body ?? {};
+    let reportData = b.report_data ?? b.rows ?? b.data;
+
+    // PRD-10: Session-based retrieval when report_data not in body
+    if ((!Array.isArray(reportData) || reportData.length === 0) && b.session_id) {
+      const stored = sessionReportStore.get(String(b.session_id));
+      if (stored && stored.length > 0) reportData = stored;
+    }
+
+    const rawFilename = (b.filename as string) || `report-${Date.now()}.csv`;
+    const filename = String(rawFilename).replace(/["\\\r\n\x00-\x1f]/g, "_").slice(0, 200) || "report.csv";
+
+    if (!Array.isArray(reportData) || reportData.length === 0) {
+      return res.status(400).json({ error: "report_data (array of rows) or session_id with stored report required for export" });
+    }
+
+    const headers = Object.keys(reportData[0] as object);
+    const csvRows = [
+      headers.map((h) => `"${String(h).replace(/"/g, '""')}"`).join(","),
+      ...reportData.map((row: any) =>
+        headers.map((h) => `"${String(row?.[h] ?? "").replace(/"/g, '""')}"`).join(",")
+      ),
+    ];
+    const csv = csvRows.join("\r\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(csv);
+  }));
 
   // Public branding config (no auth) — used by login/register pages
   // ?slug=xxx → resolve vendorName from gold.vendors; copyright is generic
@@ -663,16 +954,46 @@ export function registerRoutes(app: Express) {
       const page = Math.max(1, parseInt((req.query.page as string) || "1"));
       const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50")));
 
-      const q = (req.query.q as string) || undefined;
+      const q = (req.query.q as string)?.trim() || undefined;
       const brand = (req.query.brand as string) || undefined;
       const status = (req.query.status as string) || undefined;
       const categoryId = (req.query.category_id as string) || undefined;
 
-      // If there's a search term or any filter, use the search path
+      // RAG integration (PRD-03): when search query present, try graph search first
+      if (q && vendorId) {
+        const ragResult = await ragSearch({
+          query: q,
+          vendor_id: vendorId,
+          filters: { brand, status, category_id: categoryId },
+          limit,
+        });
+        if (ragResult?.results?.length) {
+          const enriched: any[] = [];
+          for (const r of ragResult.results) {
+            const prod = await s.getProduct?.(r.id, vendorId);
+            if (prod) {
+              enriched.push({
+                ...mapProductForApi(prod),
+                _score: r.score,
+                _reasons: r.reasons ?? [],
+              });
+            }
+          }
+          return ok(res, {
+            data: enriched,
+            page,
+            pageSize: limit,
+            total: enriched.length,
+            query_interpretation: ragResult.query_interpretation ?? null,
+          });
+        }
+      }
+
+      // SQL fallback: existing search/list path
       if ((q || brand || status || categoryId) && typeof s.searchProducts === "function") {
         const itemsOrResult = await s.searchProducts(
           vendorId,
-          q,
+          q ?? "",
           { brand, status, categoryId, page, pageSize: limit }
         );
 
@@ -690,7 +1011,7 @@ export function registerRoutes(app: Express) {
 
       return ok(res, { data: [], page, pageSize: limit, total: 0 });
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to load products", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to load products"), req);
     }
   }));
 
@@ -706,8 +1027,127 @@ export function registerRoutes(app: Express) {
       }
       return problem(res, 404, "Product not found", req);
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to load product", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to load product"), req);
     }
+  }));
+
+  // Product ingredient intelligence (PRD-08)
+  const productIntelHandler = withAuth(async (req: any, res: Response) => {
+    const productId = String(req.params.id);
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const s: any = storage as any;
+    const product = typeof s.getProduct === "function" ? await s.getProduct(productId, vendorId) : null;
+    if (!product) return problem(res, 404, "Product not found", req);
+
+    const ragResult = await ragProductIntel({ product_id: productId, vendor_id: vendorId });
+    if (ragResult) return ok(res, ragResult);
+
+    ok(res, {
+      ingredients: product.ingredients ?? [],
+      allergens: product.allergens ?? [],
+      diet_compatibility: product.dietaryTags ?? [],
+      customer_suitability: null,
+      fallback: true,
+    });
+  });
+
+  app.get("/products/:id/intel", productIntelHandler);
+  app.get("/api/v1/products/:id/intelligence", productIntelHandler);
+
+  // PRD-04: POST /api/v1/products/:id/matching-customers (body: limit, includeWarnings, include_reasons)
+  app.post("/api/v1/products/:id/matching-customers", withAuth(async (req: any, res) => {
+    const productId = String(req.params.id);
+    const vendorId = req.auth?.vendorId;
+    const b = req.body ?? {};
+    const limit = Math.min(100, Math.max(1, parseInt(b.limit ?? "50", 10) || 50));
+
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const s: any = storage as any;
+    const product = typeof s.getProduct === "function" ? await s.getProduct(productId, vendorId) : null;
+    if (!product) return problem(res, 404, "Product not found", req);
+
+    const ragResult = await ragMatch({
+      product_id: productId,
+      vendor_id: vendorId,
+      limit,
+    });
+    if (ragResult?.customers?.length) return ok(res, ragResult);
+
+    return ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+  }));
+
+  // Product-to-customer matching (PRD-04): which customers can safely use this product
+  app.get("/products/:id/matching-customers", withAuth(async (req: any, res) => {
+    const productId = String(req.params.id);
+    const vendorId = req.auth?.vendorId;
+    const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || "50", 10) || 50));
+
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const s: any = storage as any;
+    const product = typeof s.getProduct === "function" ? await s.getProduct(productId, vendorId) : null;
+    if (!product) return problem(res, 404, "Product not found", req);
+
+    const ragResult = await ragMatch({
+      product_id: productId,
+      vendor_id: vendorId,
+      limit,
+    });
+    if (ragResult?.customers?.length) return ok(res, ragResult);
+
+    ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+  }));
+
+  // PRD-09: POST /api/v1/products/:id/substitutions (body: customer_id, limit)
+  app.post("/api/v1/products/:id/substitutions", withAuth(async (req: any, res) => {
+    const productId = String(req.params.id);
+    const vendorId = req.auth?.vendorId;
+    const b = req.body ?? {};
+    const customerId = (b.customer_id as string) || undefined;
+    const limit = Math.min(50, Math.max(1, parseInt(String(b.limit ?? "10"), 10) || 10));
+
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const s: any = storage as any;
+    const product = typeof s.getProduct === "function" ? await s.getProduct(productId, vendorId) : null;
+    if (!product) return problem(res, 404, "Product not found", req);
+
+    const ragResult = await ragSubstitutions({
+      product_id: productId,
+      vendor_id: vendorId,
+      customer_id: customerId || undefined,
+      limit,
+    });
+    if (ragResult?.substitutes?.length) return ok(res, ragResult);
+
+    return ok(res, { substitutes: [], fallback: true });
+  }));
+
+  // Product substitutions (PRD-09)
+  app.get("/products/:id/substitutions", withAuth(async (req: any, res) => {
+    const productId = String(req.params.id);
+    const vendorId = req.auth?.vendorId;
+    const customerId = (req.query.customer_id as string) || undefined;
+    const limit = Math.min(50, Math.max(1, parseInt((req.query.limit as string) || "10", 10) || 10));
+
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const s: any = storage as any;
+    const product = typeof s.getProduct === "function" ? await s.getProduct(productId, vendorId) : null;
+    if (!product) return problem(res, 404, "Product not found", req);
+
+    const ragResult = await ragSubstitutions({
+      product_id: productId,
+      vendor_id: vendorId,
+      customer_id: customerId || undefined,
+      limit,
+    });
+    if (ragResult?.substitutes?.length) return ok(res, ragResult);
+
+    ok(res, { substitutes: [], fallback: true });
   }));
 
   // --- CREATE product ---
@@ -824,7 +1264,7 @@ export function registerRoutes(app: Express) {
       if (!updated) return problem(res, 404, "Product not found", req);
       return ok(res, mapProductForApi(updated));
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to update product", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to update product"), req);
     }
   }));
 
@@ -840,7 +1280,7 @@ export function registerRoutes(app: Express) {
       if (!okDel) return problem(res, 404, "Product not found", req);
       return ok(res, { ok: true });
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to delete product", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to delete product"), req);
     }
   }));
 
@@ -879,7 +1319,7 @@ export function registerRoutes(app: Express) {
         : await s.getCustomers(vendorId, { page, pageSize: limit });
       return ok(res, Array.isArray(items) ? items.map(mapCustomerForApi) : []);
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to load customers", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to load customers"), req);
     }
   }));
 
@@ -895,12 +1335,172 @@ export function registerRoutes(app: Express) {
       }
       return problem(res, 404, "Customer not found", req);
     } catch (err: any) {
-      return problem(res, 500, err?.message || "Failed to load customer", req);
+      return problem(res, 500, safeErrorDetail(err, "Failed to load customer"), req);
     }
   }));
 
-  // GET /taxonomy/diets?top=10[&all=1] (public, read-only dropdown data)
-  app.get("/taxonomy/diets", async (_req: any, res) => {
+  // PRD-02: GET /api/v1/customers/:id/recommendations (alias for /matching/:customerId)
+  app.get("/api/v1/customers/:id/recommendations", withAuth(async (req: any, res) => {
+    const customerId = String(req.params.id);
+    if (!MATCHING_ENABLED) {
+      return res.status(503).json({
+        ok: false,
+        code: "MATCHING_DISABLED",
+        message: "Matching is temporarily disconnected. Neo4j integration is pending.",
+      });
+    }
+    const limitRaw = Number(req.query.limit ?? req.query.top ?? 20);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 20;
+
+    const row = await db
+      .select({ vendorId: schema.customers.vendorId })
+      .from(schema.customers)
+      .where(eq(schema.customers.id, customerId))
+      .limit(1);
+
+    const vendorId: string | undefined = row?.[0]?.vendorId ?? req.auth?.vendorId;
+    if (!vendorId) return ok(res, { products: [], explanation: null, fallback: true, message: "No vendor access" });
+
+    const chpForRag = schema.customerHealthProfiles;
+    const profileRow = await db
+      .select({
+        avoidAllergens: chpForRag.avoidAllergens,
+        dietGoals: chpForRag.dietGoals,
+        conditions: chpForRag.conditions,
+        derivedLimits: chpForRag.derivedLimits,
+        activityLevel: chpForRag.activityLevel,
+        healthGoal: chpForRag.healthGoal,
+      })
+      .from(chpForRag)
+      .where(eq(chpForRag.customerId, customerId))
+      .limit(1);
+    const hp = profileRow?.[0];
+    const ragResult = await ragRecommend({
+      b2b_customer_id: customerId,
+      vendor_id: vendorId,
+      allergens: hp?.avoidAllergens ?? [],
+      health_conditions: hp?.conditions ?? [],
+      dietary_preferences: hp?.dietGoals ?? [],
+      health_profile: hp ? { derived_limits: hp.derivedLimits, activity_level: hp.activityLevel, health_goal: hp.healthGoal } : undefined,
+      limit,
+    });
+    if (ragResult?.products?.length) {
+      const s: any = storage as any;
+      const enriched: any[] = [];
+      for (const r of ragResult.products) {
+        const prod = await s.getProduct?.(r.id, vendorId);
+        if (prod) {
+          enriched.push({
+            ...mapProductForApi(prod),
+            score: typeof r.score === "number" ? r.score : 0,
+            reasons: r.reasons ?? [],
+          });
+        }
+      }
+      return ok(res, { products: enriched, explanation: ragResult.explanation ?? null, fallback: false });
+    }
+
+    let preferred: any[] = [];
+    const USE_SERVICE = process.env.USE_MATCHING_SERVICE === "1";
+    if (USE_SERVICE) {
+      try {
+        const svc = await import("./services/matching.js");
+        if (typeof svc.getMatchesForCustomer === "function") {
+          const raw = await svc.getMatchesForCustomer(vendorId, customerId, limit);
+          preferred = asArray(raw).map(withScorePct).slice(0, limit);
+        }
+      } catch { /* fall through */ }
+    }
+
+    if (preferred.length > 0) {
+      const products = preferred.map((p: any) => ({
+        ...mapProductForApi(p),
+        score: p._score ?? (typeof p.score_pct === "number" ? p.score_pct / 100 : 0),
+        reasons: p._reasons ?? [],
+      }));
+      return ok(res, { products, explanation: null, fallback: true });
+    }
+
+    const chp = schema.customerHealthProfiles;
+    const cx = await db
+      .select({ avoidAllergens: chp.avoidAllergens, dietGoals: chp.dietGoals, derivedLimits: chp.derivedLimits, conditions: chp.conditions })
+      .from(chp)
+      .where(eq(chp.customerId, customerId))
+      .limit(1);
+
+    const avoidRaw = cx?.[0]?.avoidAllergens ?? [];
+    const avoid: string[] = Array.isArray(avoidRaw) ? avoidRaw : [avoidRaw].filter(Boolean);
+    const goals = cx?.[0]?.dietGoals ?? [];
+    const limits = (cx?.[0]?.derivedLimits as any) ?? {};
+    const conds = cx?.[0]?.conditions ?? [];
+
+    const rules = conds.length
+      ? await db
+        .select({ policy: schema.dietRules.policy })
+        .from(schema.dietRules)
+        .where(and(
+          eq(schema.dietRules.vendorId, vendorId),
+          sql`${schema.dietRules.conditionCode} = ANY (${textArray(conds as string[])})`,
+          eq(schema.dietRules.active, true)
+        ))
+      : [];
+
+    const merged = mergePolicies((rules ?? []).map((r: any) => r.policy));
+    const requiredTags: string[] = merged.required_tags ?? [];
+    const preferTags: string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...goals]));
+    const hardLimits: Record<string, number> = { ...(merged.hard_limits ?? {}), ...limits };
+
+    const p = schema.products;
+    const whereClause = requiredTags.length
+      ? and(
+        eq(p.vendorId, vendorId),
+        eq(p.status, "active"),
+        sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`,
+        sql`${textArray(requiredTags)} <@ coalesce(${p.dietaryTags}, '{}')`
+      )
+      : and(
+        eq(p.vendorId, vendorId),
+        eq(p.status, "active"),
+        sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`
+      );
+
+    const base = await db.select().from(p).where(whereClause).orderBy(desc(p.updatedAt)).limit(200);
+    const now = Date.now();
+    const items = base
+      .map((r: any) => {
+        for (const [k, lim] of Object.entries(hardLimits as Record<string, number>)) {
+          const v = r?.nutrition?.[k];
+          if (v != null && Number.isFinite(Number(v)) && Number(v) > Number(lim)) return null;
+        }
+        const tags: string[] = r.dietaryTags ?? [];
+        const hit = preferTags.length ? preferTags.filter(g => tags.includes(g)).length / preferTags.length : 0;
+        let penalty = 0;
+        if (r?.nutrition?.sodium_mg != null && hardLimits?.sodium_mg) {
+          const v = Number(r.nutrition.sodium_mg), L = Number(hardLimits.sodium_mg);
+          if (Number.isFinite(v) && Number.isFinite(L) && L > 0) {
+            penalty = Math.min(0.2, Math.max(0, ((v - 0.5 * L) / (0.5 * L)) * 0.2));
+          }
+        }
+        const updated = r.updatedAt ? new Date(r.updatedAt).getTime() : now;
+        const ageDays = Math.max(0, (now - updated) / 86_400_000);
+        const recency = Math.max(0, 1 - Math.min(ageDays / 90, 1));
+        const score01 = Math.max(0, Math.min(1, 0.6 + 0.4 * hit - penalty + 0.05 * recency));
+        return { ...r, score: score01, reasons: [], _updatedAtMs: updated };
+      })
+      .filter(Boolean)
+      .sort((a: any, b: any) => (b.score - a.score) || (b._updatedAtMs - a._updatedAtMs))
+      .slice(0, limit);
+
+    const products = items.map((r: any) => ({
+      ...mapProductForApi(r),
+      score: r.score ?? 0,
+      reasons: r.reasons ?? [],
+    }));
+    return ok(res, { products, explanation: null, fallback: true });
+  }));
+
+  // GET /taxonomy/diets?top=10[&all=1] (auth required, read-only dropdown data)
+  app.get("/taxonomy/diets", withAuth(async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -910,10 +1510,10 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
-  });
+  }));
 
-  // GET /taxonomy/allergens?top=10[&all=1] (public, read-only dropdown data)
-  app.get("/taxonomy/allergens", async (_req: any, res) => {
+  // GET /taxonomy/allergens?top=10[&all=1] (auth required, read-only dropdown data)
+  app.get("/taxonomy/allergens", withAuth(async (_req: any, res) => {
     const top = Number.isFinite(+_req.query.top) ? Math.max(1, +_req.query.top) : 10;
     const all = String(_req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -923,10 +1523,10 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ code: r.code, label: r.label })) });
-  });
+  }));
 
-  // GET /taxonomy/conditions?top=10[&all=1] (public, read-only dropdown data)
-  app.get("/taxonomy/conditions", async (req: any, res) => {
+  // GET /taxonomy/conditions?top=10[&all=1] (auth required, read-only dropdown data)
+  app.get("/taxonomy/conditions", withAuth(async (req: any, res) => {
     const top = Number.isFinite(+req.query.top) ? Math.max(1, +req.query.top) : 10;
     const all = String(req.query.all ?? "0") === "1";
     const q = await db.execute(sql`
@@ -936,7 +1536,7 @@ export function registerRoutes(app: Express) {
       limit ${all ? 5000 : top}
     `);
     return ok(res, { data: (q.rows ?? []).map((r: any) => ({ conditionCode: r.condition_code, label: r.label })) });
-  });
+  }));
 
   // GET /taxonomy/debug (auth) - list codes/names for allergens and conditions to verify DB data
   app.get("/taxonomy/debug", withAuth(async (_req: any, res) => {
@@ -952,12 +1552,12 @@ export function registerRoutes(app: Express) {
         diets: (diets.rows ?? []) as { code: string; name: string }[],
       });
     } catch (e: any) {
-      return problem(res, 500, e?.message ?? "Taxonomy debug failed", _req);
+      return problem(res, 500, safeErrorDetail(e, "Taxonomy debug failed"), _req);
     }
   }));
 
-  // GET /taxonomy/health-goals (public, read-only dropdown for Dietary Goals / health_goal)
-  app.get("/taxonomy/health-goals", async (_req: any, res) => {
+  // GET /taxonomy/health-goals (auth required, read-only dropdown for Dietary Goals / health_goal)
+  app.get("/taxonomy/health-goals", withAuth(async (_req: any, res) => {
     const goals = [
       { code: "weight_loss", label: "Weight Loss" },
       { code: "muscle_gain", label: "Muscle Gain" },
@@ -973,7 +1573,7 @@ export function registerRoutes(app: Express) {
       { code: "plant_based", label: "Plant Based" },
     ];
     return ok(res, { data: goals });
-  });
+  }));
 
   // UPDATE customer (profile fields)
   app.patch("/customers/:id", withAuth(async (req: any, res) => {
@@ -1038,7 +1638,7 @@ export function registerRoutes(app: Express) {
   app.get("/customers/:id/products/:productId/notes", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
     if (!vendorId) return problem(res, 403, "No vendor access", req);
-    const row = await (storage as any).getCustomerProductNote(String(req.params.id), String(req.params.productId));
+    const row = await (storage as any).getCustomerProductNote(String(req.params.id), String(req.params.productId), vendorId);
     return ok(res, row ?? { note: null });
   }));
 
@@ -1097,15 +1697,6 @@ export function registerRoutes(app: Express) {
       Object.entries(patch).filter(([, v]) => v !== undefined)
     );
 
-    // [DEBUG] Log dietary inputs before save
-    if (clean.conditions?.length || clean.avoidAllergens?.length || clean.dietGoals?.length) {
-      console.log("[PATCH /customers/:id/health] dietary inputs:", {
-        conditions: clean.conditions,
-        avoidAllergens: clean.avoidAllergens,
-        dietGoals: clean.dietGoals,
-      });
-    }
-
     try {
       await storage.upsertCustomerHealth(customerId, vendorId, clean);
       const withProfile = await storage.getCustomerWithProfile(customerId, vendorId);
@@ -1128,7 +1719,7 @@ export function registerRoutes(app: Express) {
     const b = req.body ?? {};
 
     // Basic customer fields the form already collects
-    const customerInput = {
+    const customerInput: Record<string, any> = {
       fullName: b.name ?? b.fullName,    // UI uses "name"
       email: b.email,
       phone: b.phone ?? null,
@@ -1139,6 +1730,14 @@ export function registerRoutes(app: Express) {
       gender: b.health?.gender ?? null,
       status: b.status ?? "active",
     };
+    // Location (city, state, postal, country)
+    if (b.location && typeof b.location === "object") {
+      const l = b.location;
+      if (typeof l.city === "string" && l.city.trim()) customerInput.locationCity = l.city.trim();
+      if (typeof l.state === "string" && l.state.trim()) customerInput.locationRegion = l.state.trim();
+      if (typeof l.postal === "string" && l.postal.trim()) customerInput.locationPostalCode = l.postal.trim();
+      if (typeof l.country === "string" && l.country.trim()) customerInput.locationCountry = l.country.trim().toUpperCase();
+    }
 
     // Normalize health (optional block)
     const h = b.health ?? null;
@@ -1214,8 +1813,49 @@ export function registerRoutes(app: Express) {
     const vendorId: string | undefined = row?.[0]?.vendorId ?? req.auth?.vendorId;
     if (!vendorId) return ok(res, { data: [] });
 
+    // RAG integration (PRD-02, PRD-04): try graph recommend first
+    const chpForRag = schema.customerHealthProfiles;
+    const profileRow = await db
+      .select({
+        avoidAllergens: chpForRag.avoidAllergens,
+        dietGoals: chpForRag.dietGoals,
+        conditions: chpForRag.conditions,
+        derivedLimits: chpForRag.derivedLimits,
+        activityLevel: chpForRag.activityLevel,
+        healthGoal: chpForRag.healthGoal,
+      })
+      .from(chpForRag)
+      .where(eq(chpForRag.customerId, customerId))
+      .limit(1);
+    const hp = profileRow?.[0];
+    const ragResult = await ragRecommend({
+      b2b_customer_id: customerId,
+      vendor_id: vendorId,
+      allergens: hp?.avoidAllergens ?? [],
+      health_conditions: hp?.conditions ?? [],
+      dietary_preferences: hp?.dietGoals ?? [],
+      health_profile: hp ? { derived_limits: hp.derivedLimits, activity_level: hp.activityLevel, health_goal: hp.healthGoal } : undefined,
+      limit,
+    });
+    if (ragResult?.products?.length) {
+      const s: any = storage as any;
+      const enriched: any[] = [];
+      for (const r of ragResult.products) {
+        const prod = await s.getProduct?.(r.id, vendorId);
+        if (prod) {
+          enriched.push({
+            ...mapProductForApi(prod),
+            _score: r.score,
+            score_pct: typeof r.score === "number" ? Math.round(r.score * 100) : r.score,
+            _reasons: r.reasons ?? [],
+          });
+        }
+      }
+      return ok(res, { data: enriched, explanation: ragResult.explanation ?? null });
+    }
+
     let preferred: any[] = [];
-    // 2) Try the service first
+    // 2) Try the matching service
     const USE_SERVICE = process.env.USE_MATCHING_SERVICE === "1";
     if (USE_SERVICE) {
       try {
@@ -1382,6 +2022,33 @@ export function registerRoutes(app: Express) {
         conditions: Array.from(new Set([...(profile.conditions ?? []), ...(b.conditions ?? [])])),
         derivedLimits: profile.derivedLimits ?? {},
       };
+
+      // RAG integration (PRD-02, PRD-04): try graph recommend with preview overrides
+      const ragResult = await ragRecommend({
+        b2b_customer_id: customerId,
+        vendor_id: vendorId,
+        allergens: preview.avoidAllergens,
+        health_conditions: preview.conditions,
+        dietary_preferences: preview.dietGoals,
+        health_profile: { derived_limits: preview.derivedLimits },
+        limit,
+      });
+      if (ragResult?.products?.length) {
+        const s: any = storage as any;
+        const enriched: any[] = [];
+        for (const r of ragResult.products) {
+          const prod = await s.getProduct?.(r.id, vendorId);
+          if (prod) {
+            enriched.push({
+              ...mapProductForApi(prod),
+              _score: r.score,
+              score_pct: typeof r.score === "number" ? Math.round(r.score * 100) : r.score,
+              _reasons: r.reasons ?? [],
+            });
+          }
+        }
+        return ok(res, { data: enriched.slice(0, limit), explanation: ragResult.explanation ?? null });
+      }
 
       // Prefer service helper if enabled
       if (process.env.USE_MATCHING_SERVICE === "1") {

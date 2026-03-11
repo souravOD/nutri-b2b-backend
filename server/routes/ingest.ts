@@ -43,6 +43,7 @@ import {
 } from "../services/ingest-service.js";
 import { createResumableUpload, supabaseAdmin, ensureBucket } from "../lib/supabase.js";
 import { storeSecret } from "../lib/supabase.js";
+import { safeErrorDetail } from "../lib/safe-error.js";
 
 const router = Router();
 
@@ -122,7 +123,7 @@ router.post(
             }, 202);
         } catch (err: any) {
             console.error("[POST /ingest/products]", err);
-            return problem(res, 500, err?.message || "Ingestion failed");
+            return problem(res, 500, safeErrorDetail(err, "Ingestion failed"));
         }
     }
 );
@@ -176,7 +177,7 @@ router.post(
             }, 202);
         } catch (err: any) {
             console.error("[POST /ingest/customers]", err);
-            return problem(res, 500, err?.message || "Ingestion failed");
+            return problem(res, 500, safeErrorDetail(err, "Ingestion failed"));
         }
     }
 );
@@ -227,7 +228,7 @@ router.post(
             }, 202);
         } catch (err: any) {
             console.error("[POST /ingest/customers/health]", err);
-            return problem(res, 500, err?.message || "Ingestion failed");
+            return problem(res, 500, safeErrorDetail(err, "Ingestion failed"));
         }
     }
 );
@@ -339,7 +340,7 @@ router.post(
             }, 202);
         } catch (err: any) {
             console.error("[POST /ingest/products/images]", err);
-            return problem(res, 500, err?.message || "Image ingestion failed");
+            return problem(res, 500, safeErrorDetail(err, "Image ingestion failed"));
         }
     }
 );
@@ -389,7 +390,7 @@ router.post(
             }, 201);
         } catch (err: any) {
             console.error("[POST /ingest/csv]", err);
-            return problem(res, 500, err?.message || "CSV upload initiation failed");
+            return problem(res, 500, safeErrorDetail(err, "CSV upload initiation failed"));
         }
     }
 );
@@ -469,7 +470,7 @@ router.post(
             }, 202);
         } catch (err: any) {
             console.error("[POST /ingest/csv/complete]", err);
-            return problem(res, 500, err?.message || "CSV completion trigger failed");
+            return problem(res, 500, safeErrorDetail(err, "CSV completion trigger failed"));
         }
     }
 );
@@ -495,7 +496,7 @@ router.get(
             return ok(res, { data: runs });
         } catch (err: any) {
             console.error("[GET /ingest/runs]", err);
-            return problem(res, 500, err?.message || "Failed to list runs");
+            return problem(res, 500, safeErrorDetail(err, "Failed to list runs"));
         }
     }
 );
@@ -536,7 +537,7 @@ router.get(
             return ok(res, { data: { ...run, layers } });
         } catch (err: any) {
             console.error("[GET /ingest/runs/:id]", err);
-            return problem(res, 500, err?.message || "Failed to get run detail");
+            return problem(res, 500, safeErrorDetail(err, "Failed to get run detail"));
         }
     }
 );
@@ -606,6 +607,10 @@ router.get(
             const ingestionRunId = params.ingestion_run_id || runId;
             const mode = job.mode;
             const table = resolveBronzeTable(mode);
+            const ALLOWED_BRONZE_TABLES = ["raw_products", "raw_customers", "raw_customer_health_profiles", "raw_ingredients", "raw_recipes"];
+            if (!ALLOWED_BRONZE_TABLES.includes(table)) {
+                return problem(res, 400, "Invalid ingestion mode", req);
+            }
 
             let bronzeCounts = { total: 0 };
             try {
@@ -651,7 +656,7 @@ router.get(
             });
         } catch (err: any) {
             console.error("[GET /ingest/status]", err);
-            return problem(res, 500, err?.message || "Status check failed");
+            return problem(res, 500, safeErrorDetail(err, "Status check failed"));
         }
     }
 );
@@ -740,7 +745,7 @@ router.post(
             }, 201);
         } catch (err: any) {
             console.error("[POST /keys]", err);
-            return problem(res, 500, err?.message || "Key creation failed");
+            return problem(res, 500, safeErrorDetail(err, "Key creation failed"));
         }
     }
 );
@@ -768,7 +773,7 @@ router.get(
             return ok(res, { data: result.rows });
         } catch (err: any) {
             console.error("[GET /keys]", err);
-            return problem(res, 500, err?.message || "Key listing failed");
+            return problem(res, 500, safeErrorDetail(err, "Key listing failed"));
         }
     }
 );
@@ -805,7 +810,7 @@ router.delete(
             return ok(res, { ok: true, revoked: keyId });
         } catch (err: any) {
             console.error("[DELETE /keys]", err);
-            return problem(res, 500, err?.message || "Key revocation failed");
+            return problem(res, 500, safeErrorDetail(err, "Key revocation failed"));
         }
     }
 );

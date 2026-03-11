@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import helmet from "helmet";
 import "dotenv/config";
 import http from "http";
 import { logger } from "./lib/logger.js";
@@ -17,6 +18,7 @@ export const app = express();
 export default app;
 
 (async () => {
+  app.use(helmet());
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
@@ -159,4 +161,7 @@ export default app;
     }
 
   });
-})();
+})().catch((err) => {
+  console.error("[startup] Fatal error:", err);
+  process.exit(1);
+});
