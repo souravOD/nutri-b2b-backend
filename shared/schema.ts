@@ -102,9 +102,35 @@ export const products = gold.table("products", {
   gtinType: text("gtin_type"),
   servingSize: text("serving_size"),
   packageWeight: text("package_weight"),
+  packageWeightG: numeric("package_weight_g", { precision: 10, scale: 2 }),
+  servingSizeG: numeric("serving_size_g", { precision: 10, scale: 2 }),
+  servingsPerContainer: numeric("servings_per_container", { precision: 5, scale: 2 }),
   subCategoryId: uuid("sub_category_id"),
   cuisineId: uuid("cuisine_id"),
   marketId: uuid("market_id"),
+
+  // Gold 3: image, manufacturer, traceability
+  imageUrl: text("image_url"),
+  manufacturer: text("manufacturer"),
+  countryOfOrigin: text("country_of_origin"),
+  globalProductId: uuid("global_product_id"),
+  vendorSpecificAttrs: jsonb("vendor_specific_attrs"),
+  sourceSystem: text("source_system"),
+  mpn: text("mpn"),
+  pluCode: text("plu_code"),
+
+  // Gold 3: inline nutrition
+  calories: numeric("calories", { precision: 7, scale: 2 }),
+  totalFatG: numeric("total_fat_g", { precision: 6, scale: 2 }),
+  saturatedFatG: numeric("saturated_fat_g", { precision: 6, scale: 2 }),
+  sodiumMg: numeric("sodium_mg", { precision: 7, scale: 2 }),
+  totalCarbsG: numeric("total_carbs_g", { precision: 6, scale: 2 }),
+  totalSugarsG: numeric("total_sugars_g", { precision: 6, scale: 2 }),
+  addedSugarsG: numeric("added_sugars_g", { precision: 6, scale: 2 }),
+  proteinG: numeric("protein_g", { precision: 6, scale: 2 }),
+  dietaryFiberG: numeric("dietary_fiber_g", { precision: 6, scale: 2 }),
+  potassiumMg: numeric("potassium_mg", { precision: 6, scale: 2 }),
+  phosphorusMg: numeric("phosphorus_mg", { precision: 6, scale: 2 }),
 
   // Compatibility-layer fields
   nutrition: jsonb("nutrition"),

@@ -251,7 +251,14 @@ router.post(
                     count(*) FILTER (WHERE allergens IS NOT NULL AND array_length(allergens, 1) > 0)::int AS with_allergens,
                     count(*) FILTER (WHERE ingredients IS NOT NULL AND array_length(ingredients, 1) > 0)::int AS with_ingredients,
                     count(*) FILTER (WHERE barcode IS NOT NULL AND btrim(barcode) != '')::int AS with_barcode,
-                    count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications
+                    count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications,
+                    count(*) FILTER (WHERE image_url IS NOT NULL AND btrim(image_url) != '')::int AS with_image,
+                    count(*) FILTER (WHERE (serving_size IS NOT NULL AND btrim(serving_size) != '') OR serving_size_g IS NOT NULL)::int AS with_serving_size,
+                    count(*) FILTER (WHERE regulatory_codes IS NOT NULL AND array_length(regulatory_codes, 1) > 0)::int AS with_regulatory_codes,
+                    count(*) FILTER (WHERE country_of_origin IS NOT NULL AND btrim(country_of_origin) != '')::int AS with_country_of_origin,
+                    count(*) FILTER (WHERE manufacturer IS NOT NULL AND btrim(manufacturer) != '')::int AS with_manufacturer,
+                    count(*) FILTER (WHERE (calories IS NOT NULL) OR (total_fat_g IS NOT NULL) OR (sodium_mg IS NOT NULL) OR (total_carbs_g IS NOT NULL) OR (protein_g IS NOT NULL))::int AS with_inline_nutrition,
+                    count(*) FILTER (WHERE dietary_tags IS NOT NULL AND array_length(dietary_tags, 1) > 0)::int AS with_dietary_tags
                 FROM gold.products
                 WHERE vendor_id = ${vendorId}::uuid AND status = 'active'
                   AND soft_deleted_at IS NULL
@@ -409,6 +416,27 @@ export function evaluateRule(
             break;
         case "certification_check":
             withField = stats.with_certifications || 0;
+            break;
+        case "image_presence":
+            withField = stats.with_image || 0;
+            break;
+        case "serving_size_presence":
+            withField = stats.with_serving_size || 0;
+            break;
+        case "regulatory_codes_presence":
+            withField = stats.with_regulatory_codes || 0;
+            break;
+        case "country_of_origin_presence":
+            withField = stats.with_country_of_origin || 0;
+            break;
+        case "manufacturer_presence":
+            withField = stats.with_manufacturer || 0;
+            break;
+        case "inline_nutrition_completeness":
+            withField = stats.with_inline_nutrition || 0;
+            break;
+        case "dietary_tags_presence":
+            withField = stats.with_dietary_tags || 0;
             break;
         default:
             known = false;

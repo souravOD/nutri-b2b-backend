@@ -309,6 +309,32 @@ export async function getOrchestrationRunStatus(runId: string): Promise<any | nu
     return res.json();
 }
 
+/**
+ * Check if the ingestion orchestrator is reachable.
+ * Uses a lightweight probe (GET non-existent run) — 404 or 2xx means service is up.
+ */
+export async function checkOrchestratorHealth(): Promise<{
+    reachable: boolean;
+    url: string;
+    error?: string;
+}> {
+    const url = ORCHESTRATOR_URL;
+    try {
+        const res = await fetch(`${url}/api/runs/00000000-0000-0000-0000-000000000000`, {
+            signal: AbortSignal.timeout(5000),
+        });
+        // 404 = run not found but service responded; 2xx = success
+        const reachable = res.status === 404 || (res.status >= 200 && res.status < 300);
+        return { reachable, url, ...(reachable ? {} : { error: `Unexpected status ${res.status}` }) };
+    } catch (err: any) {
+        return {
+            reachable: false,
+            url,
+            error: err?.message || err?.code || String(err),
+        };
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Storage Overflow
 // ────────────────────────────────────────────────────────────────

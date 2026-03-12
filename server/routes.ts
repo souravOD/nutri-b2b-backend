@@ -17,7 +17,7 @@ import { and, eq, desc, sql, inArray } from "drizzle-orm";
 import * as schema from "../shared/schema.js";
 import { db } from "./lib/database.js";
 import { supabaseAdmin } from "./lib/supabase.js";     // service-role client
-import { triggerOrchestrator, getOrchestrationRunStatus, newRunId } from "./services/ingest-service.js";
+import { triggerOrchestrator, getOrchestrationRunStatus, newRunId, checkOrchestratorHealth } from "./services/ingest-service.js";
 import { getCircuitStatus, ragSearch, ragRecommend, ragMatch, ragChat, ragProductIntel, ragSubstitutions, ragSafetyCheck, ragSearchSuggest } from "./services/ragClient.js";
 import { randomUUID } from "crypto";
 import {
@@ -368,6 +368,12 @@ export function registerRoutes(app: Express) {
   // Admin endpoint for circuit breaker diagnostics (PRD-01)
   app.get("/api/v1/admin/rag-status", withAuth(async (_req: any, res) => {
     ok(res, getCircuitStatus());
+  }));
+
+  // Admin endpoint for ingestion orchestrator connectivity
+  app.get("/api/v1/admin/orchestrator-status", withAuth(async (_req: any, res) => {
+    const status = await checkOrchestratorHealth();
+    ok(res, status);
   }));
 
   // Search suggestions (PRD-03): "Did You Mean?" query expansion

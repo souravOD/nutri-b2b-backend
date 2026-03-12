@@ -14,6 +14,8 @@
     "db:migrate:019": "tsx scripts/run-migration-019.ts",
     "db:migrate:020": "tsx scripts/run-migration-020.ts",
     "db:migrate:022": "tsx scripts/run-migration-022.ts",
+    "db:migrate:024": "tsx scripts/run-migration-024.ts",
+    "db:migrate:025": "tsx scripts/run-migration-025.ts",
     "db:migrate:03gold": "npm run db:migrate:018 && npm run db:migrate:019 && npm run db:migrate:020 && npm run db:migrate:022",
     "db:verify-schema": "tsx scripts/verify-schema.ts",
     "test": "jest --passWithNoTests",
