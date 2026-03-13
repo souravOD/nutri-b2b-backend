@@ -593,6 +593,7 @@ export const webhookEndpoints = pgTable("webhook_endpoints", {
   secretRef: text("secret_ref"),
   enabled: boolean("enabled").notNull().default(true),
   description: text("description"),
+  events: text("events").array().notNull().default(sql`ARRAY['product.match.found','import.completed']::text[]`),
   retriesMax: integer("retries_max").notNull().default(3),
   toleranceSec: integer("tolerance_sec").notNull().default(300),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),

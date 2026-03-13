@@ -241,7 +241,8 @@ export class DatabaseStorage implements IStorage {
     const where: any[] = [sql`vendor_id = ${vendorId}`];
     if (status) where.push(sql`status = ${status}`);
 
-    const baseCols = sql`
+    // coreCols: absolute minimum columns that exist in any gold.products setup
+    const coreCols = sql`
         id,
         vendor_id AS "vendorId",
         external_id AS "externalId",
@@ -249,29 +250,21 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
-        sub_category_id AS "subCategoryId",
-        cuisine_id AS "cuisineId",
-        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
         currency,
         serving_size AS "servingSize",
         package_weight AS "packageWeight",
-        product_url AS "sourceUrl",
-        notes,
         status,
-        nutrition,
-        dietary_tags AS "dietaryTags",
-        allergens,
-        certifications,
-        regulatory_codes AS "regulatoryCodes",
-        ingredients,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
     `;
-    const extendedCols = sql`
+    // gold2Cols: inline nutrition + product_url/image_url (gold 2.x schema, likely present)
+    const gold2Cols = sql`
         image_url AS "imageUrl",
+        product_url AS "sourceUrl",
+        notes,
         calories,
         total_fat_g AS "totalFatG",
         saturated_fat_g AS "saturatedFatG",
@@ -281,14 +274,26 @@ export class DatabaseStorage implements IStorage {
         added_sugars_g AS "addedSugarsG",
         protein_g AS "proteinG",
         dietary_fiber_g AS "dietaryFiberG",
-        potassium_mg AS "potassiumMg",
+        potassium_mg AS "potassiumMg"
+    `;
+    // compatCols: jsonb/array compatibility columns added by migrations 018/019
+    const compatCols = sql`
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
         phosphorus_mg AS "phosphorusMg"
     `;
 
     let out: { rows?: any[] };
     try {
       out = await db.execute(sql`
-        SELECT ${baseCols}, ${extendedCols}
+        SELECT ${coreCols}, ${gold2Cols}, ${compatCols}
         FROM gold.products
         WHERE ${sql.join(where, sql` AND `)}
         ORDER BY updated_at DESC
@@ -297,14 +302,27 @@ export class DatabaseStorage implements IStorage {
       `);
     } catch (e: any) {
       if (e?.message?.includes?.("does not exist")) {
-        out = await db.execute(sql`
-          SELECT ${baseCols}
-          FROM gold.products
-          WHERE ${sql.join(where, sql` AND `)}
-          ORDER BY updated_at DESC
-          LIMIT ${pageSize}
-          OFFSET ${offset}
-        `);
+        try {
+          out = await db.execute(sql`
+            SELECT ${coreCols}, ${gold2Cols}
+            FROM gold.products
+            WHERE ${sql.join(where, sql` AND `)}
+            ORDER BY updated_at DESC
+            LIMIT ${pageSize}
+            OFFSET ${offset}
+          `);
+        } catch (e2: any) {
+          if (e2?.message?.includes?.("does not exist")) {
+            out = await db.execute(sql`
+              SELECT ${coreCols}
+              FROM gold.products
+              WHERE ${sql.join(where, sql` AND `)}
+              ORDER BY updated_at DESC
+              LIMIT ${pageSize}
+              OFFSET ${offset}
+            `);
+          } else throw e2;
+        }
       } else throw e;
     }
 
@@ -312,7 +330,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProduct(id: string, vendorId: string): Promise<Product | undefined> {
-    const baseCols = sql`
+    const coreCols = sql`
         id,
         vendor_id AS "vendorId",
         external_id AS "externalId",
@@ -320,29 +338,20 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
-        sub_category_id AS "subCategoryId",
-        cuisine_id AS "cuisineId",
-        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
         currency,
         serving_size AS "servingSize",
         package_weight AS "packageWeight",
-        product_url AS "sourceUrl",
-        notes,
         status,
-        nutrition,
-        dietary_tags AS "dietaryTags",
-        allergens,
-        certifications,
-        regulatory_codes AS "regulatoryCodes",
-        ingredients,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
     `;
-    const extendedCols = sql`
+    const gold2Cols = sql`
         image_url AS "imageUrl",
+        product_url AS "sourceUrl",
+        notes,
         calories,
         total_fat_g AS "totalFatG",
         saturated_fat_g AS "saturatedFatG",
@@ -352,26 +361,48 @@ export class DatabaseStorage implements IStorage {
         added_sugars_g AS "addedSugarsG",
         protein_g AS "proteinG",
         dietary_fiber_g AS "dietaryFiberG",
-        potassium_mg AS "potassiumMg",
+        potassium_mg AS "potassiumMg"
+    `;
+    const compatCols = sql`
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
         phosphorus_mg AS "phosphorusMg"
     `;
 
     let out: { rows?: any[] };
     try {
       out = await db.execute(sql`
-        SELECT ${baseCols}, ${extendedCols}
+        SELECT ${coreCols}, ${gold2Cols}, ${compatCols}
         FROM gold.products
         WHERE id = ${id} AND vendor_id = ${vendorId}
         LIMIT 1
       `);
     } catch (e: any) {
       if (e?.message?.includes?.("does not exist")) {
-        out = await db.execute(sql`
-          SELECT ${baseCols}
-          FROM gold.products
-          WHERE id = ${id} AND vendor_id = ${vendorId}
-          LIMIT 1
-        `);
+        try {
+          out = await db.execute(sql`
+            SELECT ${coreCols}, ${gold2Cols}
+            FROM gold.products
+            WHERE id = ${id} AND vendor_id = ${vendorId}
+            LIMIT 1
+          `);
+        } catch (e2: any) {
+          if (e2?.message?.includes?.("does not exist")) {
+            out = await db.execute(sql`
+              SELECT ${coreCols}
+              FROM gold.products
+              WHERE id = ${id} AND vendor_id = ${vendorId}
+              LIMIT 1
+            `);
+          } else throw e2;
+        }
       } else throw e;
     }
     return (out.rows?.[0] as Product | undefined) ?? undefined;
@@ -1197,8 +1228,8 @@ export class DatabaseStorage implements IStorage {
     if (filters?.categoryId) where.push(sql`category_id = ${filters.categoryId}`);
     if (status) where.push(sql`status = ${status}`);
 
-    const out = await db.execute(sql`
-      SELECT
+    // searchCoreCols: absolute minimum columns
+    const searchCoreCols = sql`
         id,
         vendor_id AS "vendorId",
         external_id AS "externalId",
@@ -1206,26 +1237,81 @@ export class DatabaseStorage implements IStorage {
         brand,
         description,
         category_id AS "categoryId",
-        sub_category_id AS "subCategoryId",
-        cuisine_id AS "cuisineId",
-        market_id AS "marketId",
         barcode,
         gtin_type AS "gtinType",
         price,
         currency,
         serving_size AS "servingSize",
         package_weight AS "packageWeight",
-        product_url AS "sourceUrl",
-        notes,
         status,
         created_at AS "createdAt",
         updated_at AS "updatedAt"
-      FROM gold.products
-      WHERE ${sql.join(where, sql` AND `)}
-      ORDER BY updated_at DESC
-      LIMIT ${pageSize}
-      OFFSET ${offset}
-    `);
+    `;
+    // searchGold2Cols: inline nutrition + image_url/product_url (gold 2.x schema, likely present)
+    const searchGold2Cols = sql`
+        image_url AS "imageUrl",
+        product_url AS "sourceUrl",
+        notes,
+        calories,
+        total_fat_g AS "totalFatG",
+        saturated_fat_g AS "saturatedFatG",
+        sodium_mg AS "sodiumMg",
+        total_carbs_g AS "totalCarbsG",
+        total_sugars_g AS "totalSugarsG",
+        added_sugars_g AS "addedSugarsG",
+        protein_g AS "proteinG",
+        dietary_fiber_g AS "dietaryFiberG",
+        potassium_mg AS "potassiumMg"
+    `;
+    // searchCompatCols: compatibility columns from migrations 018/019
+    const searchCompatCols = sql`
+        sub_category_id AS "subCategoryId",
+        cuisine_id AS "cuisineId",
+        market_id AS "marketId",
+        nutrition,
+        dietary_tags AS "dietaryTags",
+        allergens,
+        certifications,
+        regulatory_codes AS "regulatoryCodes",
+        ingredients,
+        phosphorus_mg AS "phosphorusMg"
+    `;
+
+    let out: { rows?: any[] };
+    try {
+      out = await db.execute(sql`
+        SELECT ${searchCoreCols}, ${searchGold2Cols}, ${searchCompatCols}
+        FROM gold.products
+        WHERE ${sql.join(where, sql` AND `)}
+        ORDER BY updated_at DESC
+        LIMIT ${pageSize}
+        OFFSET ${offset}
+      `);
+    } catch (e: any) {
+      if (e?.message?.includes?.("does not exist")) {
+        try {
+          out = await db.execute(sql`
+            SELECT ${searchCoreCols}, ${searchGold2Cols}
+            FROM gold.products
+            WHERE ${sql.join(where, sql` AND `)}
+            ORDER BY updated_at DESC
+            LIMIT ${pageSize}
+            OFFSET ${offset}
+          `);
+        } catch (e2: any) {
+          if (e2?.message?.includes?.("does not exist")) {
+            out = await db.execute(sql`
+              SELECT ${searchCoreCols}
+              FROM gold.products
+              WHERE ${sql.join(where, sql` AND `)}
+              ORDER BY updated_at DESC
+              LIMIT ${pageSize}
+              OFFSET ${offset}
+            `);
+          } else throw e2;
+        }
+      } else throw e;
+    }
     return (out.rows || []) as Product[];
   }
 

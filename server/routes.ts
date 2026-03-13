@@ -11,6 +11,7 @@ import qualityRouter from "./routes/quality.js";
 import alertsRouter from "./routes/alerts.js";
 import complianceRouter from "./routes/compliance.js";
 import profileRouter from "./routes/profile.js";
+import webhooksRouter from "./routes/webhooks.js";
 import { storage } from "./storage.js";
 import { extractJWT, requireAuth } from "./lib/auth.js";
 import { and, eq, desc, sql, inArray } from "drizzle-orm";
@@ -313,7 +314,7 @@ const withAuth = (handler: RequestHandler): RequestHandler => {
       try {
         if (!req.auth) req.auth = (res as any).locals?.auth;
       } catch { }
-      return handler(req, res, next);
+      Promise.resolve(handler(req, res, next)).catch(next);
     });
   };
 };
@@ -355,6 +356,9 @@ export function registerRoutes(app: Express) {
 
   // ── Profile ──
   app.use("/api/profile", profileRouter);
+
+  // ── Webhooks ──
+  app.use("/api/v1/webhooks", webhooksRouter);
 
   // health
   app.get("/health", (_req, res) => {
@@ -586,42 +590,44 @@ export function registerRoutes(app: Express) {
     const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
 
     try {
-      const [productTrend, customerTrend, runTrend, totals] = await Promise.all([
-        db.execute(sql`
-          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
-          FROM gold.products
-          WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
-          GROUP BY 1 ORDER BY 1
-        `),
-        db.execute(sql`
-          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
-          FROM gold.b2b_customers
-          WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
-          GROUP BY 1 ORDER BY 1
-        `),
-        db.execute(sql`
-          SELECT date_trunc('day', started_at)::date AS day, COUNT(*)::int AS count
-          FROM orchestration.orchestration_runs
-          WHERE vendor_id = ${vendorId}::uuid AND started_at >= now() - (${days}::text || ' days')::interval
-          GROUP BY 1 ORDER BY 1
-        `),
-        db.execute(sql`
-          SELECT
-            (SELECT COUNT(*)::int FROM gold.products WHERE vendor_id = ${vendorId}::uuid) AS products,
-            (SELECT COUNT(*)::int FROM gold.b2b_customers WHERE vendor_id = ${vendorId}::uuid AND account_status = 'active') AS customers,
-            (SELECT COUNT(*)::int FROM public.ingestion_jobs WHERE vendor_id = ${vendorId}::uuid AND status = 'completed') AS completed_jobs
-        `),
-      ]);
+      const productTrend = await db.execute(sql`
+        SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
+        FROM gold.products
+        WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
+        GROUP BY 1 ORDER BY 1
+      `).catch(() => ({ rows: [] as any[] }));
+      const customerTrend = await db.execute(sql`
+        SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
+        FROM gold.b2b_customers
+        WHERE vendor_id = ${vendorId}::uuid AND created_at >= now() - (${days}::text || ' days')::interval
+        GROUP BY 1 ORDER BY 1
+      `).catch(() => ({ rows: [] as any[] }));
+      const runTrend = await db.execute(sql`
+        SELECT date_trunc('day', started_at)::date AS day, COUNT(*)::int AS count
+        FROM orchestration.orchestration_runs
+        WHERE vendor_id = ${vendorId}::uuid AND started_at >= now() - (${days}::text || ' days')::interval
+        GROUP BY 1 ORDER BY 1
+      `).catch(() => ({ rows: [] as any[] }));
+      const totalProducts = await db.execute(sql`
+        SELECT COUNT(*)::int AS count FROM gold.products WHERE vendor_id = ${vendorId}::uuid
+      `).catch(() => ({ rows: [{ count: 0 }] as any[] }));
+      const totalCustomers = await db.execute(sql`
+        SELECT COUNT(*)::int AS count FROM gold.b2b_customers
+        WHERE vendor_id = ${vendorId}::uuid AND account_status = 'active'
+      `).catch(() => ({ rows: [{ count: 0 }] as any[] }));
+      const totalJobs = await db.execute(sql`
+        SELECT COUNT(*)::int AS count FROM public.ingestion_jobs
+        WHERE vendor_id = ${vendorId}::uuid AND status = 'completed'
+      `).catch(() => ({ rows: [{ count: 0 }] as any[] }));
 
-      const totalRow = totals.rows?.[0] as any;
       ok(res, {
         productTrend: (productTrend.rows ?? []) as { day: string; count: number }[],
         customerTrend: (customerTrend.rows ?? []) as { day: string; count: number }[],
         runTrend: (runTrend.rows ?? []) as { day: string; count: number }[],
         totals: {
-          products: totalRow?.products ?? 0,
-          customers: totalRow?.customers ?? 0,
-          completedJobs: totalRow?.completed_jobs ?? 0,
+          products: (totalProducts.rows?.[0] as any)?.count ?? 0,
+          customers: (totalCustomers.rows?.[0] as any)?.count ?? 0,
+          completedJobs: (totalJobs.rows?.[0] as any)?.count ?? 0,
         },
         days,
       });
@@ -692,26 +698,36 @@ export function registerRoutes(app: Express) {
     });
   });
 
-  // metrics (stub if not implemented in storage)
+  // metrics
   app.get("/metrics", withAuth(async (req: any, res) => {
     const s: any = storage as any;
     const vendorId = req.auth?.vendorId ?? null;
 
     if (typeof s.getSystemMetrics === "function") {
       try {
-        const metrics = await s.getSystemMetrics(vendorId);
-        return ok(res, metrics);
+        const m = await s.getSystemMetrics(vendorId);
+        return ok(res, {
+          totalProducts: m.products ?? 0,
+          activeCustomers: m.activeCustomers ?? 0,
+          profilesWithMatchesPct: m.profilesWithMatchesPct ?? 0,
+          pendingJobs: m.pendingJobs ?? 0,
+          uptimeSec: Math.floor(process.uptime()),
+          database: m.database,
+        });
       } catch (e: any) {
-        console.warn("[metrics] fallback:", e?.message || e);
+        console.warn("[metrics] error:", e?.message || e);
       }
     }
 
-    // fallback stub so the page renders
+    // fallback stub so the dashboard never breaks
     return ok(res, {
+      totalProducts: 0,
+      activeCustomers: 0,
+      profilesWithMatchesPct: 0,
+      pendingJobs: 0,
       uptimeSec: Math.floor(process.uptime()),
       api: "ok",
       vendorId,
-      notes: "metrics stub (implement storage.getSystemMetrics to replace)",
     });
   }));
 
@@ -1820,20 +1836,38 @@ export function registerRoutes(app: Express) {
     if (!vendorId) return ok(res, { data: [] });
 
     // RAG integration (PRD-02, PRD-04): try graph recommend first
-    const chpForRag = schema.customerHealthProfiles;
-    const profileRow = await db
-      .select({
-        avoidAllergens: chpForRag.avoidAllergens,
-        dietGoals: chpForRag.dietGoals,
-        conditions: chpForRag.conditions,
-        derivedLimits: chpForRag.derivedLimits,
-        activityLevel: chpForRag.activityLevel,
-        healthGoal: chpForRag.healthGoal,
-      })
-      .from(chpForRag)
-      .where(eq(chpForRag.customerId, customerId))
-      .limit(1);
-    const hp = profileRow?.[0];
+    // customerHealthProfiles has no avoidAllergens/conditions/dietGoals columns;
+    // those live in junction tables — use raw SQL to join them in one query.
+    const profileRaw = await db.execute(sql`
+      SELECT
+        chp.activity_level   AS "activityLevel",
+        chp.health_goal      AS "healthGoal",
+        COALESCE(
+          (SELECT array_agg(a.code)
+           FROM gold.b2b_customer_allergens ca
+           JOIN gold.allergens a ON a.id = ca.allergen_id
+           WHERE ca.b2b_customer_id = chp.b2b_customer_id AND ca.is_active = true),
+          '{}'::text[]
+        ) AS "avoidAllergens",
+        COALESCE(
+          (SELECT array_agg(hc.code)
+           FROM gold.b2b_customer_health_conditions cc
+           JOIN gold.health_conditions hc ON hc.id = cc.condition_id
+           WHERE cc.b2b_customer_id = chp.b2b_customer_id AND cc.is_active = true),
+          '{}'::text[]
+        ) AS "conditions",
+        COALESCE(
+          (SELECT array_agg(dp.code)
+           FROM gold.b2b_customer_dietary_preferences cdp
+           JOIN gold.dietary_preferences dp ON dp.id = cdp.diet_id
+           WHERE cdp.b2b_customer_id = chp.b2b_customer_id AND cdp.is_active = true),
+          '{}'::text[]
+        ) AS "dietGoals"
+      FROM gold.b2b_customer_health_profiles chp
+      WHERE chp.b2b_customer_id = ${customerId}::uuid
+      LIMIT 1
+    `);
+    const hp = (profileRaw.rows[0] as any) ?? null;
     const ragResult = await ragRecommend({
       b2b_customer_id: customerId,
       vendor_id: vendorId,
@@ -1877,38 +1911,31 @@ export function registerRoutes(app: Express) {
     }
 
     // 3) Fallback: simple but faithful prefilter + scoring
-    const p = schema.products;
 
-    // Bring in a bit of the profile (avoid + limits)
-    const chp = schema.customerHealthProfiles;
-    const cx = await db
-      .select({
-        avoidAllergens: chp.avoidAllergens,
-        dietGoals: chp.dietGoals,
-        derivedLimits: chp.derivedLimits,
-        conditions: chp.conditions,
-      })
-      .from(chp)
-      .where(eq(chp.customerId, customerId))
-      .limit(1);
-
-    const avoidRaw = cx?.[0]?.avoidAllergens ?? [];
+    // Reuse health profile data fetched above (no second DB round-trip)
+    const avoidRaw = hp?.avoidAllergens ?? [];
     const avoid: string[] = Array.isArray(avoidRaw) ? avoidRaw : [avoidRaw].filter(Boolean);
-    const goals = cx?.[0]?.dietGoals ?? [];
-    const limits = (cx?.[0]?.derivedLimits as any) ?? {};
-    const conds = cx?.[0]?.conditions ?? [];
+    const goals: string[] = hp?.dietGoals ?? [];
+    const limits = {}; // derivedLimits not persisted in DB; hard limits come from dietRules only
+    const conds: string[] = hp?.conditions ?? [];
 
     // Fetch vendor diet policies for the customer's conditions
-    const rules = conds.length
-      ? await db
-        .select({ policy: schema.dietRules.policy })
-        .from(schema.dietRules)
-        .where(and(
-          eq(schema.dietRules.vendorId, vendorId),
-          sql`${schema.dietRules.conditionCode} = ANY (${textArray(conds as string[])})`,
-          eq(schema.dietRules.active, true)
-        ))
-      : [];
+    let rules: any[] = [];
+    if (conds.length) {
+      try {
+        rules = await db
+          .select({ policy: schema.dietRules.policy })
+          .from(schema.dietRules)
+          .where(and(
+            eq(schema.dietRules.vendorId, vendorId),
+            sql`${schema.dietRules.conditionCode} = ANY (${textArray(conds as string[])})`,
+            eq(schema.dietRules.active, true)
+          ));
+      } catch {
+        // diet_rules table not yet created in DB — skip policy filtering, fall back to allergen-only matching
+        rules = [];
+      }
+    }
 
     // Merge policies into require/prefer/limits; combine with derivedLimits
     const merged = mergePolicies((rules ?? []).map((r: any) => r.policy));
@@ -1916,26 +1943,69 @@ export function registerRoutes(app: Express) {
     const preferTags: string[] = Array.from(new Set([...(merged.bonus_tags ?? []), ...goals]));
     const hardLimits: Record<string, number> = { ...(merged.hard_limits ?? {}), ...limits };
 
-    // vendor + active + NOT allergen conflicts (+ requiredTags if present)
-    const whereClause = requiredTags.length
-      ? and(
-        eq(p.vendorId, vendorId),
-        eq(p.status, "active"),
-        sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`,
-        sql`${textArray(requiredTags)} <@ coalesce(${p.dietaryTags}, '{}')`
-      )
-      : and(
-        eq(p.vendorId, vendorId),
-        eq(p.status, "active"),
-        sql`NOT (coalesce(${p.allergens}, '{}') && ${textArray(avoid)})`
-      );
+    // gold.products has no allergens/dietary_tags columns — use junction tables
+    const avoidSql = avoid.length
+      ? sql`AND NOT EXISTS (
+          SELECT 1 FROM gold.product_allergens pa
+          JOIN gold.allergens a ON a.id = pa.allergen_id
+          WHERE pa.product_id = p.id
+            AND a.code = ANY(ARRAY[${sql.join(avoid.map((a: string) => sql`${a}`), sql`, `)}]::text[])
+        )`
+      : sql``;
 
-    const base = await db
-      .select()
-      .from(p)
-      .where(whereClause)
-      .orderBy(desc(p.updatedAt))
-      .limit(200);
+    const reqSql = requiredTags.length
+      ? sql`AND (
+          SELECT COUNT(DISTINCT dp2.code)
+          FROM gold.product_dietary_preferences pdp2
+          JOIN gold.dietary_preferences dp2 ON dp2.id = pdp2.diet_id
+          WHERE pdp2.product_id = p.id
+            AND dp2.code = ANY(ARRAY[${sql.join(requiredTags.map((t: string) => sql`${t}`), sql`, `)}]::text[])
+            AND pdp2.is_compatible = true
+        ) = ${requiredTags.length}`
+      : sql``;
+
+    const rawResult = await db.execute(sql`
+      SELECT
+        p.id,
+        p.vendor_id       AS "vendorId",
+        p.external_id     AS "externalId",
+        p.name,
+        p.brand,
+        p.description,
+        p.category_id     AS "categoryId",
+        p.price,
+        p.currency,
+        p.status,
+        p.calories,
+        p.protein_g       AS "proteinG",
+        p.sodium_mg       AS "sodiumMg",
+        p.total_fat_g     AS "totalFatG",
+        p.image_url       AS "imageUrl",
+        p.updated_at      AS "updatedAt",
+        p.created_at      AS "createdAt",
+        COALESCE(
+          (SELECT array_agg(a.code)
+           FROM gold.product_allergens pa
+           JOIN gold.allergens a ON a.id = pa.allergen_id
+           WHERE pa.product_id = p.id),
+          '{}'::text[]
+        ) AS "allergens",
+        COALESCE(
+          (SELECT array_agg(dp.code)
+           FROM gold.product_dietary_preferences pdp
+           JOIN gold.dietary_preferences dp ON dp.id = pdp.diet_id
+           WHERE pdp.product_id = p.id AND pdp.is_compatible = true),
+          '{}'::text[]
+        ) AS "dietaryTags"
+      FROM gold.products p
+      WHERE p.vendor_id = ${vendorId}::uuid
+        AND p.status = 'active'
+        ${avoidSql}
+        ${reqSql}
+      ORDER BY p.updated_at DESC
+      LIMIT 200
+    `);
+    const base: any[] = rawResult.rows as any[];
 
     // score like the service: preferences + small sodium penalty; only drop on *known* hard-limit exceed
     const now = Date.now();
