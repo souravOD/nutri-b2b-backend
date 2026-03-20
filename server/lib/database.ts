@@ -52,11 +52,3 @@ if (replicaPool !== primaryPool) {
     .catch((e) => console.warn("[db] read-replica failed, using primary instead"));
 }
 
-// optional debug
-// export async function query(text: string, values: any[]) {
-//   if (process.env.DEBUG_SQL) {
-//     console.log("[SQL]", text);
-//     console.log("[SQL params]", values);
-//   }
-//   return pool.query(text, values);
-// }

@@ -514,4 +514,158 @@ router.post(
     }
 );
 
+// ── GET /users/:userId/export ────────────────────────────────────
+// GDPR data export: collects all user-linked rows and returns as JSON.
+// Requires manage:users permission.
+router.get(
+    "/:userId/export",
+    requireAuth as any,
+    requirePermissionMiddleware("manage:users") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth: AuthContext = (req as any).auth;
+            const { userId } = req.params;
+            const vendorId = auth.vendorId;
+
+            // Verify user belongs to this vendor
+            const userCheck = await db.execute(sql`
+                SELECT u.id, u.email, u.display_name, u.appwrite_user_id, u.created_at,
+                       ul.role, ul.status
+                FROM gold.b2b_users u
+                JOIN gold.b2b_user_links ul ON ul.user_id = u.id
+                WHERE u.id = ${userId}::uuid
+                  AND ul.vendor_id = ${vendorId}::uuid
+                LIMIT 1
+            `);
+            if (!userCheck.rows?.[0]) return problem(res, 404, "User not found in this vendor");
+
+            // Collect all user-linked rows in parallel
+            const [userLinks, auditEntries, systemSettingsUpdates] = await Promise.all([
+                db.execute(sql`
+                    SELECT ul.role, ul.status, ul.created_at, ul.updated_at,
+                           v.name AS vendor_name, v.slug AS vendor_slug
+                    FROM gold.b2b_user_links ul
+                    JOIN gold.vendors v ON v.id = ul.vendor_id
+                    WHERE ul.user_id = ${userId}::uuid
+                `).catch(() => ({ rows: [] as any[] })),
+
+                db.execute(sql`
+                    SELECT action, resource_type, resource_id, details, created_at
+                    FROM gold.audit_log
+                    WHERE user_id = ${userId}::uuid
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                `).catch(() => ({ rows: [] as any[] })),
+
+                db.execute(sql`
+                    SELECT key, updated_at
+                    FROM gold.system_settings
+                    WHERE updated_by = ${userId}::uuid
+                    ORDER BY updated_at DESC
+                `).catch(() => ({ rows: [] as any[] })),
+            ]);
+
+            const user = userCheck.rows[0] as any;
+            const exportPayload = {
+                exportedAt: new Date().toISOString(),
+                user: {
+                    id: user.id,
+                    email: user.email,
+                    displayName: user.display_name,
+                    createdAt: user.created_at,
+                },
+                vendorLinks: userLinks.rows,
+                auditLog: auditEntries.rows,
+                settingsUpdated: systemSettingsUpdates.rows,
+            };
+
+            res.setHeader("Content-Type", "application/json");
+            res.setHeader("Content-Disposition", `attachment; filename="user-export-${userId}.json"`);
+            return res.json(exportPayload);
+        } catch (err: any) {
+            console.error("[GET /users/:userId/export]", err);
+            return problem(res, 500, safeErrorDetail(err, "Failed to export user data"));
+        }
+    }
+);
+
+// ── DELETE /users/:userId/purge ──────────────────────────────────
+// GDPR right to erasure: anonymises PII and hard-deletes vendor link.
+// Requires superadmin role. Cannot purge yourself.
+router.delete(
+    "/:userId/purge",
+    requireAuth as any,
+    requireRoleMiddleware("superadmin") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth: AuthContext = (req as any).auth;
+            const { userId } = req.params;
+            const vendorId = auth.vendorId;
+
+            if (userId === auth.userId) return problem(res, 400, "Cannot purge your own account");
+
+            // Verify user exists in this vendor
+            const check = await db.execute(sql`
+                SELECT u.id, u.appwrite_user_id
+                FROM gold.b2b_users u
+                JOIN gold.b2b_user_links ul ON ul.user_id = u.id
+                WHERE u.id = ${userId}::uuid
+                  AND ul.vendor_id = ${vendorId}::uuid
+                LIMIT 1
+            `);
+            if (!check.rows?.[0]) return problem(res, 404, "User not found in this vendor");
+
+            const appwriteUserId = (check.rows[0] as any)?.appwrite_user_id;
+            const anonymisedEmail = `deleted-${userId}@deleted.invalid`;
+
+            await db.transaction(async (tx) => {
+                // Anonymise PII in b2b_users
+                await tx.execute(sql`
+                    UPDATE gold.b2b_users
+                    SET email        = ${anonymisedEmail},
+                        display_name = '[deleted]',
+                        updated_at   = now()
+                    WHERE id = ${userId}::uuid
+                `);
+                // Hard-delete vendor link
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_user_links
+                    WHERE user_id = ${userId}::uuid
+                      AND vendor_id = ${vendorId}::uuid
+                `);
+                // Nullify user references in audit_log (keep entries, remove identity)
+                await tx.execute(sql`
+                    UPDATE gold.audit_log
+                    SET user_id = NULL
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => { /* column may not be nullable in all deployments */ });
+            });
+
+            // Best-effort: remove from Appwrite team
+            if (appwriteUserId) {
+                try {
+                    const teamRow = await db.execute(sql`
+                        SELECT team_id FROM gold.vendors WHERE id = ${vendorId}::uuid LIMIT 1
+                    `);
+                    const teamId = (teamRow.rows?.[0] as any)?.team_id;
+                    if (teamId) {
+                        const teams = adminTeams();
+                        const memberships = await teams.listMemberships(teamId, [Query.equal("userId", appwriteUserId)]);
+                        if (memberships.memberships.length > 0) {
+                            await teams.deleteMembership(teamId, memberships.memberships[0].$id);
+                        }
+                    }
+                } catch (awErr: any) {
+                    console.warn("[DELETE /users/:userId/purge] Appwrite cleanup skipped:", awErr?.message);
+                }
+            }
+
+            return res.json({ userId, purged: true, anonymisedEmail });
+        } catch (err: any) {
+            console.error("[DELETE /users/:userId/purge]", err);
+            return problem(res, 500, safeErrorDetail(err, "Failed to purge user data"));
+        }
+    }
+);
+
 export default router;

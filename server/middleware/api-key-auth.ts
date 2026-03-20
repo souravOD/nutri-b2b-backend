@@ -168,25 +168,6 @@ export function universalAuth(requiredScopes?: string[]) {
         const apiKeyHeader = req.headers["x-api-key"] as string | undefined;
 
         try {
-            // ── Path 0: Dev bypass (development only, requires secret) ──
-            const bypassSecret = process.env.DEV_BYPASS_SECRET;
-            if (
-                process.env.NODE_ENV === "development" &&
-                bypassSecret &&
-                req.headers["x-dev-bypass"] === bypassSecret
-            ) {
-                req.auth = {
-                    userId: "dev-user",
-                    appwriteUserId: "dev-user",
-                    email: "dev@localhost",
-                    vendorId: req.headers["x-dev-vendor-id"] as string || "00000000-0000-0000-0000-000000000000",
-                    role: "superadmin",
-                    permissions: ["*"],
-                };
-                console.warn("[universalAuth] ⚠️  DEV BYPASS active — not for production!");
-                return next();
-            }
-
             // ── Path 1: HMAC-SHA256 ──────────────────────────────────
             if (authHeader.startsWith("HMAC-SHA256")) {
                 const parsed = parseHmacHeader(authHeader);

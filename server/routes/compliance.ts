@@ -70,8 +70,20 @@ router.get(
                 });
             }
 
+            const q = ((req.query.q as string) || "").trim();
+            const severityFilter = (req.query.severity as string) || null;
+            const validSeverities = ["critical", "warning", "info"];
+            const fromDate = (req.query.from_date as string) || null;
+            const toDate = (req.query.to_date as string) || null;
+
             const conditions = [sql`c.vendor_id = ${vendorId}::uuid`];
             if (statusFilter) conditions.push(sql`c.status = ${statusFilter}`);
+            if (q) conditions.push(sql`r.title ILIKE ${"%" + q + "%"}`);
+            if (severityFilter && validSeverities.includes(severityFilter)) {
+                conditions.push(sql`r.severity = ${severityFilter}`);
+            }
+            if (fromDate) conditions.push(sql`c.checked_at >= ${fromDate}::date`);
+            if (toDate) conditions.push(sql`c.checked_at < (${toDate}::date + interval '1 day')`);
             const where = sql.join(conditions, sql` AND `);
 
             const countResult = await db.execute(sql`

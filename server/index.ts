@@ -109,7 +109,7 @@ export default app;
       return next();
     }
 
-    if (process.env.CORS_ALLOW_ALL === "1") {
+    if (process.env.CORS_ALLOW_ALL === "1" && isDev) {
       allow(origin);
       if (req.method === "OPTIONS") return res.sendStatus(204);
       return next();

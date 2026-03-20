@@ -12,6 +12,8 @@ import alertsRouter from "./routes/alerts.js";
 import complianceRouter from "./routes/compliance.js";
 import profileRouter from "./routes/profile.js";
 import webhooksRouter from "./routes/webhooks.js";
+import { emitWebhookEvent } from "./lib/webhooks.js";
+import { auditHealthAccess } from "./lib/audit.js";
 import { storage } from "./storage.js";
 import { extractJWT, requireAuth } from "./lib/auth.js";
 import { and, eq, desc, sql, inArray } from "drizzle-orm";
@@ -392,6 +394,123 @@ export function registerRoutes(app: Express) {
     ok(res, { suggestions: [], entities_found: null, fallback: true });
   }));
 
+  // TODO: Uncomment when db:push is run to create user_searches table
+  // GET /api/v1/search/recent — fetch user's recent search queries (persistent)
+  // app.get("/api/v1/search/recent", withAuth(async (req: any, res) => {
+  //   try {
+  //     const userId = req.auth?.userId;
+  //     if (!userId) return ok(res, { data: [] });
+  //     const rows = await db
+  //       .selectDistinctOn([schema.userSearches.query], {
+  //         query: schema.userSearches.query,
+  //         searchedAt: schema.userSearches.searchedAt,
+  //       })
+  //       .from(schema.userSearches)
+  //       .where(eq(schema.userSearches.userId, userId))
+  //       .orderBy(schema.userSearches.query, desc(schema.userSearches.searchedAt))
+  //       .limit(10);
+  //     const sorted = rows
+  //       .sort((a, b) => new Date(b.searchedAt!).getTime() - new Date(a.searchedAt!).getTime())
+  //       .slice(0, 5)
+  //       .map(r => r.query);
+  //     return ok(res, { data: sorted });
+  //   } catch (err: any) {
+  //     return ok(res, { data: [] });
+  //   }
+  // }));
+
+  // TODO: Uncomment when db:push is run to create user_searches table
+  // POST /api/v1/search/recent — save a search query for the current user
+  // app.post("/api/v1/search/recent", withAuth(async (req: any, res) => {
+  //   try {
+  //     const userId = req.auth?.userId;
+  //     const vendorId = req.auth?.vendorId;
+  //     const query = (req.body?.query as string)?.trim();
+  //     if (!userId || !query || query.length < 2) return ok(res, { ok: true });
+  //     await db.delete(schema.userSearches).where(
+  //       and(eq(schema.userSearches.userId, userId), eq(schema.userSearches.query, query))
+  //     );
+  //     await db.insert(schema.userSearches).values({ userId, vendorId: vendorId ?? null, query });
+  //     const all = await db
+  //       .select({ id: schema.userSearches.id, searchedAt: schema.userSearches.searchedAt })
+  //       .from(schema.userSearches)
+  //       .where(eq(schema.userSearches.userId, userId))
+  //       .orderBy(desc(schema.userSearches.searchedAt));
+  //     if (all.length > 10) {
+  //       const toDelete = all.slice(10).map(r => r.id);
+  //       await db.delete(schema.userSearches).where(inArray(schema.userSearches.id, toDelete));
+  //     }
+  //     return ok(res, { ok: true });
+  //   } catch {
+  //     return ok(res, { ok: true });
+  //   }
+  // }));
+
+  // GET /api/v1/search/trending-categories — top categories by product count
+  app.get("/api/v1/search/trending-categories", withAuth(async (req: any, res) => {
+    try {
+      const vendorId = req.auth?.vendorId;
+      const rows = await db.execute(sql`
+        SELECT
+          pc.id,
+          pc.slug AS code,
+          pc.name AS label,
+          pc.description,
+          COUNT(p.id) AS product_count
+        FROM gold.product_categories pc
+        LEFT JOIN gold.products p
+          ON p.category_id = pc.id
+          AND p.vendor_id = ${vendorId}::uuid
+          AND p.status = 'Active'
+        WHERE pc.parent_category_id IS NULL
+        GROUP BY pc.id, pc.slug, pc.name, pc.description
+        ORDER BY product_count DESC
+        LIMIT 8
+      `);
+      return ok(res, { data: rows.rows ?? rows });
+    } catch (err: any) {
+      return ok(res, { data: [] });
+    }
+  }));
+
+  // GET /api/v1/search/popular-products — most recently active products (proxy for popular)
+  app.get("/api/v1/search/popular-products", withAuth(async (req: any, res) => {
+    try {
+      const vendorId = req.auth?.vendorId;
+      if (!vendorId) return ok(res, { data: [] });
+      const limit = Math.min(20, parseInt(String(req.query.limit || 10), 10) || 10);
+      const rows = await db.execute(sql`
+        SELECT *
+        FROM gold.products
+        WHERE vendor_id = ${vendorId}::uuid AND status = 'Active'
+        ORDER BY updated_at DESC
+        LIMIT ${limit}
+      `);
+      const data = (rows.rows ?? rows as any[]).map(mapProductForApi);
+      return ok(res, { data });
+    } catch (err: any) {
+      return ok(res, { data: [] });
+    }
+  }));
+
+  // GET /api/v1/search/suggested-vendors — top vendors (no ratings)
+  app.get("/api/v1/search/suggested-vendors", withAuth(async (req: any, res) => {
+    try {
+      const limit = Math.min(10, parseInt(String(req.query.limit || 5), 10) || 5);
+      const vendors = await storage.getVendors();
+      const data = vendors.slice(0, limit).map(v => ({
+        id: v.id,
+        name: v.name,
+        slug: v.slug,
+        status: v.status,
+        contactEmail: v.contactEmail,
+      }));
+      return ok(res, { data });
+    } catch {
+      return ok(res, { data: [] });
+    }
+  }));
+
   // Graph-enhanced product search (PRD-03): POST /api/v1/search/products
   app.post("/api/v1/search/products", withAuth(async (req: any, res) => {
     try {
@@ -636,6 +755,208 @@ export function registerRoutes(app: Express) {
     }
   }));
 
+  // Engagement analytics: activation rate, status breakdown, quality score trend
+  app.get("/api/v1/analytics/engagement", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
+
+    try {
+      const [statusDist, activationRow, qualityTrend, newCustomersTrend] = await Promise.all([
+        // Customer status distribution
+        db.execute(sql`
+          SELECT account_status, COUNT(*)::int AS count
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid
+          GROUP BY account_status
+        `).catch(() => ({ rows: [] as any[] })),
+
+        // Activation rate: customers with ≥1 health profile entry
+        db.execute(sql`
+          SELECT
+            COUNT(DISTINCT c.id)::int AS total,
+            COUNT(DISTINCT hp.customer_id)::int AS with_profile
+          FROM gold.b2b_customers c
+          LEFT JOIN gold.b2b_customer_health_profiles hp ON hp.customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+        `).catch(() => ({ rows: [{ total: 0, with_profile: 0 }] as any[] })),
+
+        // Average quality score trend by day
+        db.execute(sql`
+          SELECT date_trunc('day', pqs.created_at)::date AS day,
+                 ROUND(AVG(pqs.overall_score)::numeric, 2)::float AS avg_score
+          FROM gold.product_quality_scores pqs
+          JOIN gold.products p ON p.id = pqs.product_id
+          WHERE p.vendor_id = ${vendorId}::uuid
+            AND pqs.created_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `).catch(() => ({ rows: [] as any[] })),
+
+        // New customers per day
+        db.execute(sql`
+          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS count
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid
+            AND created_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `).catch(() => ({ rows: [] as any[] })),
+      ]);
+
+      const statusMap: Record<string, number> = {};
+      for (const row of (statusDist.rows ?? []) as any[]) {
+        statusMap[String(row.account_status ?? "unknown")] = row.count ?? 0;
+      }
+
+      const ar = (activationRow.rows?.[0] as any) ?? { total: 0, with_profile: 0 };
+      const activationRate = ar.total > 0
+        ? Math.round((ar.with_profile / ar.total) * 1000) / 10
+        : 0;
+
+      ok(res, {
+        statusDistribution: statusMap,
+        activationRate,
+        totalCustomers: ar.total,
+        customersWithProfile: ar.with_profile,
+        qualityScoreTrend: (qualityTrend.rows ?? []) as { day: string; avg_score: number }[],
+        newCustomersTrend: (newCustomersTrend.rows ?? []) as { day: string; count: number }[],
+        days,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Engagement analytics failed"), req);
+    }
+  }));
+
+  // Customer segmentation: counts by health-profile status and account_status
+  app.get("/api/v1/customers/segments", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          CASE WHEN hp.customer_id IS NOT NULL THEN 'with_profile' ELSE 'no_profile' END AS segment,
+          c.account_status,
+          COUNT(*)::int AS count
+        FROM gold.b2b_customers c
+        LEFT JOIN (
+          SELECT DISTINCT customer_id FROM gold.b2b_customer_health_profiles
+        ) hp ON hp.customer_id = c.id
+        WHERE c.vendor_id = ${vendorId}::uuid
+        GROUP BY 1, 2
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const segments: Record<string, number> = {
+        active_with_profile: 0,
+        active_no_profile: 0,
+        archived: 0,
+      };
+      for (const r of (rows.rows ?? []) as any[]) {
+        if (r.account_status !== "active") {
+          segments.archived = (segments.archived ?? 0) + (r.count ?? 0);
+        } else if (r.segment === "with_profile") {
+          segments.active_with_profile = (r.count ?? 0);
+        } else {
+          segments.active_no_profile = (r.count ?? 0);
+        }
+      }
+      ok(res, { segments });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Segment query failed"), req);
+    }
+  }));
+
+  // CRM Integration: sync customers to configured CRM provider (Salesforce / HubSpot)
+  app.post("/api/v1/integrations/crm/sync", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    try {
+      // Read CRM settings stored in system_settings
+      const settingRows = await db.execute(sql`
+        SELECT key, value FROM gold.system_settings
+        WHERE vendor_id = ${vendorId}::uuid
+          AND key IN ('crm.provider', 'crm.access_token', 'crm.instance_url', 'crm.api_key')
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const crmSettings: Record<string, string> = {};
+      for (const r of (settingRows.rows ?? []) as any[]) {
+        crmSettings[r.key] = String(r.value ?? "");
+      }
+
+      const provider = crmSettings["crm.provider"] || "none";
+      if (provider === "none" || !provider) {
+        return res.status(400).json({ error: "No CRM provider configured. Set crm.provider in settings." });
+      }
+
+      // Fetch customers for this vendor (limited batch for sync)
+      const customerRows = await db.execute(sql`
+        SELECT c.id, c.email, c.full_name, c.phone, c.account_status, c.created_at
+        FROM gold.b2b_customers c
+        WHERE c.vendor_id = ${vendorId}::uuid AND c.account_status = 'active'
+        LIMIT 100
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const customers = (customerRows.rows ?? []) as any[];
+
+      if (provider === "hubspot") {
+        const apiKey = crmSettings["crm.api_key"] || crmSettings["crm.access_token"] || "";
+        if (!apiKey) return res.status(400).json({ error: "HubSpot API key not configured (crm.api_key)" });
+
+        let synced = 0;
+        let failed = 0;
+        for (const c of customers) {
+          try {
+            const resp = await fetch("https://api.hubapi.com/crm/v3/objects/contacts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+              body: JSON.stringify({
+                properties: {
+                  email: c.email,
+                  firstname: String(c.full_name ?? "").split(" ")[0] || c.full_name,
+                  lastname: String(c.full_name ?? "").split(" ").slice(1).join(" ") || "",
+                  phone: c.phone || "",
+                },
+              }),
+            });
+            if (resp.ok || resp.status === 409) synced++; else failed++;
+          } catch { failed++; }
+        }
+        return ok(res, { provider: "hubspot", synced, failed, total: customers.length });
+
+      } else if (provider === "salesforce") {
+        const accessToken = crmSettings["crm.access_token"] || "";
+        const instanceUrl = crmSettings["crm.instance_url"] || "";
+        if (!accessToken || !instanceUrl) {
+          return res.status(400).json({ error: "Salesforce access_token and instance_url required" });
+        }
+
+        let synced = 0;
+        let failed = 0;
+        for (const c of customers) {
+          try {
+            const resp = await fetch(`${instanceUrl}/services/data/v57.0/sobjects/Contact`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` },
+              body: JSON.stringify({
+                Email: c.email,
+                FirstName: String(c.full_name ?? "").split(" ")[0] || c.full_name,
+                LastName: String(c.full_name ?? "").split(" ").slice(1).join(" ") || "Unknown",
+                Phone: c.phone || "",
+              }),
+            });
+            if (resp.ok || resp.status === 409) synced++; else failed++;
+          } catch { failed++; }
+        }
+        return ok(res, { provider: "salesforce", synced, failed, total: customers.length });
+
+      } else {
+        return res.status(400).json({ error: `Unknown CRM provider: ${provider}` });
+      }
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "CRM sync failed"), req);
+    }
+  }));
+
   // Chat report export (PRD-10): CSV download from report data or session
   app.post("/api/v1/chat/export", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
@@ -672,30 +993,51 @@ export function registerRoutes(app: Express) {
   }));
 
   // Public branding config (no auth) — used by login/register pages
-  // ?slug=xxx → resolve vendorName from gold.vendors; copyright is generic
+  // ?slug=xxx → resolve vendorName from gold.vendors + load branding settings
   app.get("/api/config/branding", async (req: Request, res: Response) => {
     const slug = (req.query.slug as string)?.trim();
     const GENERIC_COPYRIGHT = "© 2024. All rights reserved.";
 
     let vendorName: string | null = null;
+    let vendorId: string | null = null;
 
     if (slug) {
       const row = await db.execute(sql`
-        SELECT name FROM gold.vendors
+        SELECT id, name FROM gold.vendors
         WHERE lower(slug) = lower(${slug}) AND status = 'active'
         LIMIT 1
       `);
-      vendorName = (row.rows?.[0] as any)?.name?.trim() || null;
+      const vendor = row.rows?.[0] as any;
+      vendorName = vendor?.name?.trim() || null;
+      vendorId = vendor?.id || null;
     }
 
     if (!vendorName) {
       vendorName = (process.env.VENDOR_NAME ?? "").trim() || null;
     }
 
-    ok(res, {
-      vendorName,
-      copyrightText: GENERIC_COPYRIGHT,
-    });
+    let logoUrl: string | null = null;
+    let faviconUrl: string | null = null;
+    let primaryColor: string | null = null;
+    let copyrightText = (process.env.VENDOR_COPYRIGHT ?? "").trim() || GENERIC_COPYRIGHT;
+
+    if (vendorId) {
+      const brandingRows = await db.execute(sql`
+        SELECT key, value FROM gold.system_settings
+        WHERE vendor_id = ${vendorId}::uuid
+          AND key IN ('branding.logo_url', 'branding.favicon_url', 'branding.primary_color', 'branding.copyright')
+      `).catch(() => ({ rows: [] as any[] }));
+
+      for (const r of (brandingRows.rows ?? []) as any[]) {
+        const val = String(r.value ?? "").trim();
+        if (r.key === "branding.logo_url" && val) logoUrl = val;
+        if (r.key === "branding.favicon_url" && val) faviconUrl = val;
+        if (r.key === "branding.primary_color" && val) primaryColor = val;
+        if (r.key === "branding.copyright" && val) copyrightText = val;
+      }
+    }
+
+    ok(res, { vendorName, copyrightText, logoUrl, faviconUrl, primaryColor });
   });
 
   // metrics
@@ -1353,6 +1695,15 @@ export function registerRoutes(app: Express) {
       if (typeof s.getCustomer === "function") {
         const customer = await storage.getCustomerWithProfile(req.params.id, vendorId);
         if (!customer) return problem(res, 404, "Customer not found", req);
+        // Fire-and-forget: log PHI access with reason — never block the response
+        auditHealthAccess(
+          req.auth,
+          "READ_PHI",
+          req.params.id,
+          null,
+          { reason_for_access: (req.headers["x-access-reason"] as string) ?? "unspecified" },
+          req
+        ).catch(() => {});
         return ok(res, mapCustomerForApi(customer));
       }
       return problem(res, 404, "Customer not found", req);
@@ -1649,7 +2000,10 @@ export function registerRoutes(app: Express) {
 
     try {
       const withHealth = await storage.getCustomerWithProfile(id, vendorId);
-      return ok(res, mapCustomerForApi(withHealth ?? base));
+      const result = mapCustomerForApi(withHealth ?? base);
+      // Best-effort webhook emission
+      emitWebhookEvent(vendorId, "customer.updated", { customerId: id }).catch(() => {});
+      return ok(res, result);
     } catch (e: any) {
       console.error("[PATCH /customers/:id]", e);
       return problem(res, 400, e?.message || "Update failed", req);
@@ -1723,6 +2077,8 @@ export function registerRoutes(app: Express) {
       await storage.upsertCustomerHealth(customerId, vendorId, clean);
       const withProfile = await storage.getCustomerWithProfile(customerId, vendorId);
       const hp = withProfile?.healthProfile;
+      // Best-effort webhook emission
+      emitWebhookEvent(vendorId, "health_profile.updated", { customerId }).catch(() => {});
       return res.status(200).json({
         ...hp,
         activityLevel: toUiActivityLevel((hp as any)?.activityLevel ?? (hp as any)?.activity_level),
@@ -1797,7 +2153,7 @@ export function registerRoutes(app: Express) {
       // Return full profile with junction data (dietGoals, avoidAllergens, conditions)
       const full = await storage.getCustomerWithProfile(created.customer.id, vendorId);
       const merged = full ?? { ...created.customer, healthProfile: created.health };
-      return res.status(201).json({
+      const responseData = {
         customer: mapCustomerForApi(merged),
         health: merged?.healthProfile
           ? {
@@ -1805,7 +2161,10 @@ export function registerRoutes(app: Express) {
             activityLevel: toUiActivityLevel((merged.healthProfile as any).activityLevel ?? (merged.healthProfile as any).activity_level),
           }
           : null,
-      });
+      };
+      // Best-effort webhook emission
+      emitWebhookEvent(vendorId, "customer.created", { customerId: created.customer.id, email: created.customer.email }).catch(() => {});
+      return res.status(201).json(responseData);
     } catch (e: any) {
       return problem(res, 400, e?.message ?? "Create customer failed", req);
     }

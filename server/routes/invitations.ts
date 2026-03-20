@@ -120,55 +120,62 @@ router.post(
                 targetVendorId = vendor_id.trim();
             }
 
-            // Check for existing pending invitation — update it instead of blocking
-            const existing = await db.execute(sql`
-        SELECT id, appwrite_doc_id FROM gold.invitations
-        WHERE lower(email) = ${normalizedEmail}
-          AND vendor_id = ${targetVendorId}::uuid
-          AND status = 'pending'
-        LIMIT 1
-      `);
-
-            const existingRow = existing.rows?.[0] as any;
-            if (existingRow) {
-                // Clean up old Appwrite doc if it exists
-                const oldDocId = existingRow.appwrite_doc_id;
-                if (oldDocId) {
-                    try {
-                        const invCol = getInvitationsCol();
-                        if (invCol) {
-                            await adminDatabases().deleteDocument(getDbId(), invCol, oldDocId);
-                        }
-                    } catch { /* best-effort cleanup */ }
-                }
-
-                // Delete the old Supabase record so we can create a fresh one
-                await db.execute(sql`
-          DELETE FROM gold.invitations WHERE id = ${existingRow.id}::uuid
-        `);
-                console.info(`[POST /invitations] Replaced existing pending invite for ${normalizedEmail}`);
-            }
-
-            // Generate unique token for email link
+            // Generate unique token for email link (outside transaction — no DB I/O)
             const token = generateToken();
             const invId = randomUUID();
             const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-            // 1) Write to Supabase
-            await db.execute(sql`
-        INSERT INTO gold.invitations (id, vendor_id, email, role, invited_by, status, message, token, expires_at)
-        VALUES (
-          ${invId}::uuid,
-          ${targetVendorId}::uuid,
-          ${normalizedEmail},
-          ${role},
-          ${auth.userId}::uuid,
-          'pending',
-          ${message || null},
-          ${token},
-          ${expiresAt.toISOString()}::timestamptz
-        )
-      `);
+            // Atomically replace any existing pending invitation and insert the new one.
+            // SELECT FOR UPDATE locks the row (if present) so concurrent requests for the
+            // same email+vendor are serialised — preventing duplicate pending invitations.
+            let oldDocId: string | null = null;
+            await db.transaction(async (tx) => {
+                const existing = await tx.execute(sql`
+          SELECT id, appwrite_doc_id FROM gold.invitations
+          WHERE lower(email) = ${normalizedEmail}
+            AND vendor_id = ${targetVendorId}::uuid
+            AND status = 'pending'
+          LIMIT 1
+          FOR UPDATE
+        `);
+
+                const existingRow = existing.rows?.[0] as any;
+                if (existingRow) {
+                    oldDocId = existingRow.appwrite_doc_id ?? null;
+                    await tx.execute(sql`
+            DELETE FROM gold.invitations WHERE id = ${existingRow.id}::uuid
+          `);
+                    console.info(`[POST /invitations] Replaced existing pending invite for ${normalizedEmail}`);
+                }
+
+                // 1) Write to Supabase
+                await tx.execute(sql`
+          INSERT INTO gold.invitations (id, vendor_id, email, role, invited_by, status, message, token, expires_at)
+          VALUES (
+            ${invId}::uuid,
+            ${targetVendorId}::uuid,
+            ${normalizedEmail},
+            ${role},
+            ${auth.userId}::uuid,
+            'pending',
+            ${message || null},
+            ${token},
+            ${expiresAt.toISOString()}::timestamptz
+          )
+        `);
+            });
+
+            // Best-effort: clean up the superseded Appwrite doc after the DB transaction
+            // has committed. Kept outside the transaction to avoid holding the connection
+            // open during network I/O.
+            if (oldDocId) {
+                try {
+                    const invCol = getInvitationsCol();
+                    if (invCol) {
+                        await adminDatabases().deleteDocument(getDbId(), invCol, oldDocId);
+                    }
+                } catch { /* best-effort cleanup */ }
+            }
 
             // 2) Look up the vendor's Appwrite team_id (needed for both steps below)
             let teamId: string | null = null;

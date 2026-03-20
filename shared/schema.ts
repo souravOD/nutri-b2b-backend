@@ -612,6 +612,18 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 });
 
+// TODO: Uncomment when db:push is run to create this table
+// export const userSearches = pgTable("user_searches", {
+//   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+//   userId: uuid("user_id").notNull(),
+//   vendorId: uuid("vendor_id"),
+//   query: text("query").notNull(),
+//   searchedAt: timestamp("searched_at").notNull().default(sql`now()`),
+// }, (t) => ({
+//   userIdx: index("idx_user_searches_user").on(t.userId),
+//   searchedAtIdx: index("idx_user_searches_at").on(t.searchedAt),
+// }));
+
 export const idempotencyKeys = pgTable("idempotency_keys", {
   key: text("key").primaryKey(),
   vendorId: uuid("vendor_id"),
