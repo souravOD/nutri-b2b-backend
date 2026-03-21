@@ -100,7 +100,7 @@ export default app;
       res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
       res.header(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT, X-API-Key, Idempotency-Key"
+        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT, X-API-Key, Idempotency-Key, X-Access-Reason"
       );
     };
 
