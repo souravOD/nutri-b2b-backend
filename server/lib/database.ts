@@ -4,9 +4,10 @@ import { logger } from "./logger.js";
 
 
 function sslFor(url: string | undefined) {
-  // if you use Supabase/remote, keep this as 'require' or 'prefer'
-  // for local dev you can return false
-  return url?.includes(".supabase.co") ? { rejectUnauthorized: false } : false;
+  // DB_SSL_REJECT_UNAUTHORIZED=false disables cert validation (local dev only).
+  // Defaults to true (strict) — set to false only in non-production environments.
+  const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false";
+  return url?.includes(".supabase.co") ? { rejectUnauthorized } : false;
 }
 
 const PRIMARY_URL = process.env.DATABASE_URL!;

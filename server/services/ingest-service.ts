@@ -261,6 +261,7 @@ async function insertBronzeBatch(
 // ────────────────────────────────────────────────────────────────
 
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || "http://localhost:8100";
+const ORCHESTRATOR_SECRET = process.env.ORCHESTRATOR_SECRET;
 
 export interface OrchestratorTriggerResponse {
     run_id: string;
@@ -284,7 +285,10 @@ export async function triggerOrchestrator(params: {
 }): Promise<OrchestratorTriggerResponse> {
     const res = await fetch(`${ORCHESTRATOR_URL}/api/trigger`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            ...(ORCHESTRATOR_SECRET ? { "Authorization": `Bearer ${ORCHESTRATOR_SECRET}` } : {}),
+        },
         body: JSON.stringify(params),
     });
 

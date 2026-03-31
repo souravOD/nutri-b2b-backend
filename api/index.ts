@@ -38,7 +38,9 @@ async function buildApp() {
       return next();
     }
 
-    if (process.env.CORS_ALLOW_ALL === "1") {
+    // CORS_ALLOW_ALL is only honoured outside production to prevent accidental wildcard access.
+    const isProduction = process.env.NODE_ENV === "production";
+    if (process.env.CORS_ALLOW_ALL === "1" && !isProduction) {
       allow(origin);
       if (req.method === "OPTIONS") return res.sendStatus(204);
       return next();

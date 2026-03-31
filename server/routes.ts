@@ -41,6 +41,7 @@ import {
 import { validateVendorRegistrationInput } from "./lib/validators/vendorRegistration.js";
 import { toGoldProductStatus, toGoldCustomerStatus, toGoldActivityLevel } from "./lib/gold-mappers.js";
 import { safeErrorDetail } from "./lib/safe-error.js";
+import { ipAllowlistMiddleware } from "./middleware/ipAllowlist.js";
 import multer from "multer";
 import { ensureBucket } from "./lib/supabase.js";
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -54,8 +55,52 @@ const uploadMw = multer({
 
 const MATCHING_ENABLED = process.env.B2B_ENABLE_MATCHING === "1";
 
-/** PRD-10: In-memory store for chat report data keyed by session_id (for session-based export) */
+/** PRD-10: DB-backed store for chat report data (gold.b2b_chat_sessions).
+ *  Falls back to in-memory Map if the table doesn't exist yet (pre-migration). */
 const sessionReportStore = new Map<string, Record<string, unknown>[]>();
+
+async function persistChatSession(
+  sid: string, vendorId: string, userId: string,
+  rows: Record<string, unknown>[]
+): Promise<void> {
+  try {
+    await db.execute(sql`
+      INSERT INTO gold.b2b_chat_sessions (id, vendor_id, user_id, session_data, expires_at)
+      VALUES (
+        ${sid}::uuid, ${vendorId}::uuid, ${userId},
+        ${JSON.stringify({ report_rows: rows })}::jsonb,
+        NOW() + INTERVAL '30 minutes'
+      )
+      ON CONFLICT (id) DO UPDATE
+        SET session_data = EXCLUDED.session_data,
+            last_activity_at = NOW(),
+            expires_at = NOW() + INTERVAL '30 minutes'
+    `);
+  } catch {
+    // Table may not exist yet — in-memory fallback is already set above
+  }
+}
+
+async function loadChatSession(
+  sid: string, vendorId: string
+): Promise<Record<string, unknown>[] | null> {
+  try {
+    const result = await db.execute(sql`
+      SELECT session_data
+      FROM gold.b2b_chat_sessions
+      WHERE id = ${sid}::uuid
+        AND vendor_id = ${vendorId}::uuid
+        AND expires_at > NOW()
+      LIMIT 1
+    `);
+    const row = (result.rows ?? result as any[])[0];
+    if (!row) return null;
+    const data = row.session_data as any;
+    return Array.isArray(data?.report_rows) ? data.report_rows : null;
+  } catch {
+    return null;
+  }
+}
 
 function structuredDataToReportRows(sd: any): Record<string, unknown>[] {
   if (!sd || typeof sd !== "object") return [];
@@ -316,7 +361,10 @@ const withAuth = (handler: RequestHandler): RequestHandler => {
       try {
         if (!req.auth) req.auth = (res as any).locals?.auth;
       } catch { }
-      Promise.resolve(handler(req, res, next)).catch(next);
+      // IP allowlist check — only enforced for vendors that have entries configured
+      ipAllowlistMiddleware(req as any, res, () => {
+        Promise.resolve(handler(req, res, next)).catch(next);
+      });
     });
   };
 };
@@ -456,7 +504,7 @@ export function registerRoutes(app: Express) {
           pc.slug AS code,
           pc.name AS label,
           pc.description,
-          COUNT(p.id) AS product_count
+          COUNT(p.id)::int AS product_count
         FROM gold.product_categories pc
         LEFT JOIN gold.products p
           ON p.category_id = pc.id
@@ -639,7 +687,7 @@ export function registerRoutes(app: Express) {
       });
     }
 
-    // PRD-10: Store report data for session-based export
+    // PRD-10: Store report data for session-based export (DB + in-memory fallback)
     const sid = ragResult.session_id ?? session_id;
     if (sid && typeof sid === "string") {
       const rows = Array.isArray(ragResult.report_data)
@@ -647,7 +695,10 @@ export function registerRoutes(app: Express) {
         : ragResult.structured_data
           ? structuredDataToReportRows(ragResult.structured_data)
           : [];
-      if (rows.length > 0) sessionReportStore.set(sid, rows);
+      if (rows.length > 0) {
+        sessionReportStore.set(sid, rows);
+        persistChatSession(sid, vendorId, userId, rows);
+      }
     }
 
     ok(res, ragResult);
@@ -827,6 +878,115 @@ export function registerRoutes(app: Express) {
     }
   }));
 
+  // Analytics CSV export (PRD-06): download analytics data as CSV
+  // ?type=overview|engagement|health&days=30
+  app.get("/api/v1/analytics/export", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const type = String(req.query.type || "overview");
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
+
+    try {
+      let rows: Record<string, unknown>[] = [];
+      let filename = `analytics-${type}-${new Date().toISOString().slice(0, 10)}.csv`;
+
+      if (type === "overview") {
+        const [products, customers, runs] = await Promise.all([
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS new_products
+            FROM gold.products WHERE vendor_id = ${vendorId}::uuid
+              AND created_at >= now() - (${days}::text || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS new_customers
+            FROM gold.b2b_customers WHERE vendor_id = ${vendorId}::uuid
+              AND created_at >= now() - (${days}::text || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT date_trunc('day', started_at)::date AS day, COUNT(*)::int AS ingestion_runs
+            FROM orchestration.orchestration_runs WHERE vendor_id = ${vendorId}::uuid
+              AND started_at >= now() - (${days}::text || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] as any[] })),
+        ]);
+        // Merge all days into one row per day
+        const dayMap = new Map<string, Record<string, unknown>>();
+        for (const r of (products.rows ?? []) as any[]) {
+          const d = String(r.day); dayMap.set(d, { day: d, new_products: r.new_products, new_customers: 0, ingestion_runs: 0 });
+        }
+        for (const r of (customers.rows ?? []) as any[]) {
+          const d = String(r.day); const existing = dayMap.get(d) ?? { day: d, new_products: 0, new_customers: 0, ingestion_runs: 0 };
+          dayMap.set(d, { ...existing, new_customers: r.new_customers });
+        }
+        for (const r of (runs.rows ?? []) as any[]) {
+          const d = String(r.day); const existing = dayMap.get(d) ?? { day: d, new_products: 0, new_customers: 0, ingestion_runs: 0 };
+          dayMap.set(d, { ...existing, ingestion_runs: r.ingestion_runs });
+        }
+        rows = Array.from(dayMap.values()).sort((a, b) => String(a.day).localeCompare(String(b.day)));
+      } else if (type === "health") {
+        filename = `analytics-health-${new Date().toISOString().slice(0, 10)}.csv`;
+        const [allergens, conditions, diets] = await Promise.all([
+          db.execute(sql`
+            SELECT 'allergen' AS category, a.name, COUNT(DISTINCT ca.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_allergens ca
+            JOIN gold.allergens a ON ca.allergen_id = a.id
+            JOIN gold.b2b_customers c ON ca.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY a.name ORDER BY customer_count DESC LIMIT 20
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT 'health_condition' AS category, hc.name, COUNT(DISTINCT chc.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_health_conditions chc
+            JOIN gold.health_conditions hc ON chc.condition_id = hc.id
+            JOIN gold.b2b_customers c ON chc.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY hc.name ORDER BY customer_count DESC LIMIT 20
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT 'dietary_preference' AS category, dp.name, COUNT(DISTINCT cdp.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_dietary_preferences cdp
+            JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
+            JOIN gold.b2b_customers c ON cdp.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY dp.name ORDER BY customer_count DESC LIMIT 20
+          `).catch(() => ({ rows: [] as any[] })),
+        ]);
+        rows = [...(allergens.rows ?? []), ...(conditions.rows ?? []), ...(diets.rows ?? [])] as Record<string, unknown>[];
+      } else if (type === "engagement") {
+        filename = `analytics-engagement-${new Date().toISOString().slice(0, 10)}.csv`;
+        const result = await db.execute(sql`
+          SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS new_customers,
+                 COUNT(DISTINCT CASE WHEN account_status = 'active' THEN id END)::int AS active_customers
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid
+            AND created_at >= now() - (${days}::text || ' days')::interval
+          GROUP BY 1 ORDER BY 1
+        `).catch(() => ({ rows: [] as any[] }));
+        rows = (result.rows ?? []) as Record<string, unknown>[];
+      } else {
+        return problem(res, 400, "Invalid export type. Use: overview, health, engagement", req);
+      }
+
+      if (rows.length === 0) {
+        return res.status(200).send("No data available for the selected period.");
+      }
+
+      const headers = Object.keys(rows[0]);
+      const csvLines = [
+        headers.map((h) => `"${String(h).replace(/"/g, '""')}"`).join(","),
+        ...rows.map((row) =>
+          headers.map((h) => `"${String(row[h] ?? "").replace(/"/g, '""')}"`).join(",")
+        ),
+      ];
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(csvLines.join("\r\n"));
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Analytics export failed"), req);
+    }
+  }));
+
   // Customer segmentation: counts by health-profile status and account_status
   app.get("/api/v1/customers/segments", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
@@ -965,10 +1125,16 @@ export function registerRoutes(app: Express) {
     const b = req.body ?? {};
     let reportData = b.report_data ?? b.rows ?? b.data;
 
-    // PRD-10: Session-based retrieval when report_data not in body
+    // PRD-10: Session-based retrieval — check in-memory first, then DB
     if ((!Array.isArray(reportData) || reportData.length === 0) && b.session_id) {
-      const stored = sessionReportStore.get(String(b.session_id));
-      if (stored && stored.length > 0) reportData = stored;
+      const sid = String(b.session_id);
+      const stored = sessionReportStore.get(sid);
+      if (stored && stored.length > 0) {
+        reportData = stored;
+      } else {
+        const dbRows = await loadChatSession(sid, vendorId);
+        if (dbRows && dbRows.length > 0) reportData = dbRows;
+      }
     }
 
     const rawFilename = (b.filename as string) || `report-${Date.now()}.csv`;
@@ -1413,6 +1579,9 @@ export function registerRoutes(app: Express) {
       allergens: product.allergens ?? [],
       diet_compatibility: product.dietaryTags ?? [],
       customer_suitability: null,
+      market_demand_index: null,
+      regional_popularity: null,
+      sentiment: null,
       fallback: true,
     });
   });
