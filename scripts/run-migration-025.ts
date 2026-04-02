@@ -20,7 +20,7 @@ const __dirname = dirname(__filename);
 
 const client = new pg.Client({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
+    ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
 });
 await client.connect();
 

@@ -16,7 +16,7 @@ if (!DATABASE_URL) {
 
 const client = new pg.Client({
   connectionString: DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false" },
 });
 
 interface CheckResult {

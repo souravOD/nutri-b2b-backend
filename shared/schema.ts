@@ -65,6 +65,7 @@ export const userLinks = gold.table("b2b_user_links", {
   vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
   role: text("role").notNull(),
   status: text("status").notNull().default("active"),
+  membershipExpiresAt: timestamp("membership_expires_at"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 }, (table) => ({
@@ -132,6 +133,24 @@ export const products = gold.table("products", {
   potassiumMg: numeric("potassium_mg", { precision: 6, scale: 2 }),
   phosphorusMg: numeric("phosphorus_mg", { precision: 6, scale: 2 }),
 
+  // Extended nutrition (DB-002)
+  transFatG: numeric("trans_fat_g", { precision: 6, scale: 2 }),
+  cholesterolMg: numeric("cholesterol_mg", { precision: 7, scale: 2 }),
+  vitaminAMcg: numeric("vitamin_a_mcg", { precision: 7, scale: 2 }),
+  vitaminCMg: numeric("vitamin_c_mg", { precision: 7, scale: 2 }),
+  vitaminDMcg: numeric("vitamin_d_mcg", { precision: 7, scale: 2 }),
+  vitaminEMg: numeric("vitamin_e_mg", { precision: 7, scale: 2 }),
+  vitaminKMcg: numeric("vitamin_k_mcg", { precision: 7, scale: 2 }),
+  thiamineMg: numeric("thiamine_mg", { precision: 7, scale: 2 }),
+  riboflavinMg: numeric("riboflavin_mg", { precision: 7, scale: 2 }),
+  niacinMg: numeric("niacin_mg", { precision: 7, scale: 2 }),
+  vitaminB6Mg: numeric("vitamin_b6_mg", { precision: 7, scale: 2 }),
+  folateMcg: numeric("folate_mcg", { precision: 7, scale: 2 }),
+  vitaminB12Mcg: numeric("vitamin_b12_mcg", { precision: 7, scale: 2 }),
+  calciumMg: numeric("calcium_mg", { precision: 7, scale: 2 }),
+  ironMg: numeric("iron_mg", { precision: 7, scale: 2 }),
+  zincMg: numeric("zinc_mg", { precision: 7, scale: 2 }),
+
   // Compatibility-layer fields
   nutrition: jsonb("nutrition"),
   dietaryTags: text("dietary_tags").array(),
@@ -170,6 +189,10 @@ export const customers = gold.table("b2b_customers", {
   sourceSystem: text("source_system"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+
+  // Segmentation & tier
+  customerSegment: text("customer_segment"),
+  customerTier: text("customer_tier"),
 
   // Compatibility-layer fields (gold 2 schema: custom_tags, product_notes only)
   customTags: text("custom_tags").array(),
@@ -624,6 +647,54 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
 //   searchedAtIdx: index("idx_user_searches_at").on(t.searchedAt),
 // }));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance / Security tables (DB-007 — previously raw SQL only)
+// ─────────────────────────────────────────────────────────────────────────────
+export const complianceRules = gold.table("b2b_compliance_rules", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  ruleCode: text("rule_code").notNull(),
+  ruleType: text("rule_type").notNull(),
+  description: text("description"),
+  severity: text("severity").notNull().default("medium"),
+  isActive: boolean("is_active").notNull().default(true),
+  config: jsonb("config").default(sql`'{}'::jsonb`),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_compliance_rules_vendor").on(table.vendorId),
+}));
+
+export const b2bAlerts = gold.table("b2b_alerts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  type: text("type").notNull().default("system"),
+  title: text("title").notNull(),
+  description: text("description"),
+  priority: text("priority").notNull().default("medium"),
+  status: text("status").notNull().default("active"),
+  relatedEntityType: text("related_entity_type"),
+  relatedEntityId: uuid("related_entity_id"),
+  displayUntil: timestamp("display_until"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_alerts_vendor").on(table.vendorId),
+  statusIdx: index("idx_b2b_alerts_status").on(table.status),
+}));
+
+export const ipAllowlist = gold.table("b2b_ip_allowlist", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  cidr: text("cidr").notNull(),
+  label: text("label"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_ip_allowlist_vendor").on(table.vendorId),
+}));
+
 export const idempotencyKeys = pgTable("idempotency_keys", {
   key: text("key").primaryKey(),
   vendorId: uuid("vendor_id"),
@@ -683,7 +754,7 @@ export interface AuthContext {
   userId: string;
   email: string;
   vendorId: string;
-  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer" | "wellness_manager" | "marketing_manager";
   permissions: string[];
 }
 

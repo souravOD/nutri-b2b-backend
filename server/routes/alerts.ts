@@ -200,6 +200,39 @@ router.patch(
     },
 );
 
+// ── GET /alerts/banners ─────────────────────────────────────────────────────
+// Returns active system-type alerts that should be shown as dismissable
+// top-of-page banners. Returns up to 3 unread/read system alerts, newest first.
+router.get(
+    "/banners",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, title, description, priority, status, created_at
+                FROM gold.b2b_alerts
+                WHERE vendor_id = ${vendorId}::uuid
+                  AND type = 'system'
+                  AND status != 'dismissed'
+                ORDER BY created_at DESC
+                LIMIT 3
+            `);
+
+            return res.json({ banners: result.rows || [] });
+        } catch (err: any) {
+            console.error("[alerts] GET /banners error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to fetch banners" });
+        }
+    },
+);
+
 // ── Helper: insert an alert (used from other modules) ───────────────────────
 // Non-fatal: if the insert fails, it logs and returns null (never throws).
 export async function insertAlert(opts: {

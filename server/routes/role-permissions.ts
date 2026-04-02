@@ -9,13 +9,23 @@ import { sql } from "drizzle-orm";
 
 const router = Router();
 
-const EDITABLE_ROLES = ["vendor_admin", "vendor_viewer"] as const;
+const EDITABLE_ROLES = [
+  "vendor_admin", "vendor_operator", "vendor_viewer",
+  "wellness_manager", "marketing_manager",
+] as const;
+
 const VALID_PERMISSIONS = new Set([
   "read:products", "write:products", "read:customers", "write:customers",
   "read:ingest", "write:ingest", "read:matches", "read:audit",
   "manage:users", "manage:api_keys", "manage:settings",
   "read:vendors", "write:vendors",
 ]);
+
+// Default permission sets for the two new roles (used when no vendor-specific overrides exist)
+export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
+  wellness_manager: ["read:customers", "read:products", "read:matches", "read:audit"],
+  marketing_manager: ["read:customers", "read:products", "read:vendors", "write:vendors", "read:audit"],
+};
 
 // ── GET /role-permissions ────────────────────────────────────────────────────
 // Returns role-to-permissions mapping for the current vendor (or global for superadmin)
@@ -40,14 +50,14 @@ router.get(
             SELECT role, permission
             FROM gold.b2b_role_permissions
             WHERE (vendor_id = ${targetVendorId}::uuid OR vendor_id IS NULL)
-              AND role IN ('vendor_admin', 'vendor_operator', 'vendor_viewer')
+              AND role IN ('vendor_admin', 'vendor_operator', 'vendor_viewer', 'wellness_manager', 'marketing_manager')
             ORDER BY vendor_id NULLS LAST, role, permission
           `)
         : await db.execute(sql`
             SELECT role, permission
             FROM gold.b2b_role_permissions
             WHERE vendor_id IS NULL
-              AND role IN ('vendor_admin', 'vendor_operator', 'vendor_viewer')
+              AND role IN ('vendor_admin', 'vendor_operator', 'vendor_viewer', 'wellness_manager', 'marketing_manager')
             ORDER BY role, permission
           `);
 
@@ -59,6 +69,11 @@ router.get(
         seen.add(key);
         if (!byRole[row.role]) byRole[row.role] = [];
         byRole[row.role].push(row.permission);
+      }
+
+      // Inject defaults for new roles if no DB entries exist yet
+      for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+        if (!byRole[role]) byRole[role] = perms;
       }
 
       // Superadmin always has * — not stored in DB

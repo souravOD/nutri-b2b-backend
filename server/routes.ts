@@ -710,6 +710,8 @@ export function registerRoutes(app: Express) {
     if (!vendorId) return problem(res, 403, "No vendor access", req);
 
     try {
+      const K_ANON_MIN = 5; // suppress groups with fewer than 5 members (k-anonymity)
+
       const [allergens, conditions, diets, totalCustomers] = await Promise.all([
         db.execute(sql`
           SELECT a.name, COUNT(DISTINCT ca.b2b_customer_id)::int AS customer_count
@@ -717,7 +719,8 @@ export function registerRoutes(app: Express) {
           JOIN gold.allergens a ON ca.allergen_id = a.id
           JOIN gold.b2b_customers c ON ca.b2b_customer_id = c.id
           WHERE c.vendor_id = ${vendorId}::uuid
-          GROUP BY a.name ORDER BY customer_count DESC LIMIT 10
+          GROUP BY a.name HAVING COUNT(DISTINCT ca.b2b_customer_id) >= ${K_ANON_MIN}
+          ORDER BY customer_count DESC LIMIT 10
         `),
         db.execute(sql`
           SELECT hc.name, COUNT(DISTINCT chc.b2b_customer_id)::int AS customer_count
@@ -725,7 +728,8 @@ export function registerRoutes(app: Express) {
           JOIN gold.health_conditions hc ON chc.condition_id = hc.id
           JOIN gold.b2b_customers c ON chc.b2b_customer_id = c.id
           WHERE c.vendor_id = ${vendorId}::uuid
-          GROUP BY hc.name ORDER BY customer_count DESC LIMIT 10
+          GROUP BY hc.name HAVING COUNT(DISTINCT chc.b2b_customer_id) >= ${K_ANON_MIN}
+          ORDER BY customer_count DESC LIMIT 10
         `),
         db.execute(sql`
           SELECT dp.name, COUNT(DISTINCT cdp.b2b_customer_id)::int AS customer_count
@@ -733,7 +737,8 @@ export function registerRoutes(app: Express) {
           JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
           JOIN gold.b2b_customers c ON cdp.b2b_customer_id = c.id
           WHERE c.vendor_id = ${vendorId}::uuid
-          GROUP BY dp.name ORDER BY customer_count DESC LIMIT 10
+          GROUP BY dp.name HAVING COUNT(DISTINCT cdp.b2b_customer_id) >= ${K_ANON_MIN}
+          ORDER BY customer_count DESC LIMIT 10
         `),
         db.execute(sql`
           SELECT COUNT(*)::int AS total FROM gold.b2b_customers
@@ -746,6 +751,7 @@ export function registerRoutes(app: Express) {
         health_condition_distribution: (conditions.rows ?? []) as { name: string; customer_count: number }[],
         dietary_preference_distribution: (diets.rows ?? []) as { name: string; customer_count: number }[],
         total_customers: (totalCustomers.rows?.[0] as any)?.total ?? 0,
+        k_anonymity_threshold: K_ANON_MIN,
       });
     } catch (e: any) {
       problem(res, 500, safeErrorDetail(e, "Health summary failed"), req);
@@ -928,27 +934,34 @@ export function registerRoutes(app: Express) {
         rows = Array.from(dayMap.values()).sort((a, b) => String(a.day).localeCompare(String(b.day)));
       } else if (type === "health") {
         filename = `analytics-health-${new Date().toISOString().slice(0, 10)}.csv`;
+        const K_ANON_MIN_CSV = 5;
         const [allergens, conditions, diets] = await Promise.all([
           db.execute(sql`
             SELECT 'allergen' AS category, a.name, COUNT(DISTINCT ca.b2b_customer_id)::int AS customer_count
             FROM gold.b2b_customer_allergens ca
             JOIN gold.allergens a ON ca.allergen_id = a.id
             JOIN gold.b2b_customers c ON ca.b2b_customer_id = c.id
-            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY a.name ORDER BY customer_count DESC LIMIT 20
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY a.name HAVING COUNT(DISTINCT ca.b2b_customer_id) >= ${K_ANON_MIN_CSV}
+            ORDER BY customer_count DESC LIMIT 20
           `).catch(() => ({ rows: [] as any[] })),
           db.execute(sql`
             SELECT 'health_condition' AS category, hc.name, COUNT(DISTINCT chc.b2b_customer_id)::int AS customer_count
             FROM gold.b2b_customer_health_conditions chc
             JOIN gold.health_conditions hc ON chc.condition_id = hc.id
             JOIN gold.b2b_customers c ON chc.b2b_customer_id = c.id
-            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY hc.name ORDER BY customer_count DESC LIMIT 20
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY hc.name HAVING COUNT(DISTINCT chc.b2b_customer_id) >= ${K_ANON_MIN_CSV}
+            ORDER BY customer_count DESC LIMIT 20
           `).catch(() => ({ rows: [] as any[] })),
           db.execute(sql`
             SELECT 'dietary_preference' AS category, dp.name, COUNT(DISTINCT cdp.b2b_customer_id)::int AS customer_count
             FROM gold.b2b_customer_dietary_preferences cdp
             JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
             JOIN gold.b2b_customers c ON cdp.b2b_customer_id = c.id
-            WHERE c.vendor_id = ${vendorId}::uuid GROUP BY dp.name ORDER BY customer_count DESC LIMIT 20
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY dp.name HAVING COUNT(DISTINCT cdp.b2b_customer_id) >= ${K_ANON_MIN_CSV}
+            ORDER BY customer_count DESC LIMIT 20
           `).catch(() => ({ rows: [] as any[] })),
         ]);
         rows = [...(allergens.rows ?? []), ...(conditions.rows ?? []), ...(diets.rows ?? [])] as Record<string, unknown>[];
@@ -971,7 +984,49 @@ export function registerRoutes(app: Express) {
         return res.status(200).send("No data available for the selected period.");
       }
 
+      const format = String(req.query.format || "csv").toLowerCase();
       const headers = Object.keys(rows[0]);
+
+      if (format === "xlsx") {
+        // SpreadsheetML — no extra npm package required; Excel opens natively
+        const xmlEscape = (v: any) =>
+          String(v ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+
+        const xlsxFilename = filename.replace(/\.csv$/, ".xlsx");
+        const headerRow = headers.map((h) => `<Cell><Data ss:Type="String">${xmlEscape(h)}</Data></Cell>`).join("");
+        const dataRows = rows
+          .map((row) => {
+            const cells = headers
+              .map((h) => {
+                const v = row[h];
+                const isNum = typeof v === "number";
+                return `<Cell><Data ss:Type="${isNum ? "Number" : "String"}">${xmlEscape(v)}</Data></Cell>`;
+              })
+              .join("");
+            return `<Row>${cells}</Row>`;
+          })
+          .join("");
+
+        const xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Worksheet ss:Name="Analytics">
+    <Table>
+      <Row>${headerRow}</Row>
+      ${dataRows}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+
+        res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${xlsxFilename}"`);
+        return res.send(xml);
+      }
+
       const csvLines = [
         headers.map((h) => `"${String(h).replace(/"/g, '""')}"`).join(","),
         ...rows.map((row) =>
@@ -984,6 +1039,94 @@ export function registerRoutes(app: Express) {
       res.send(csvLines.join("\r\n"));
     } catch (e: any) {
       problem(res, 500, safeErrorDetail(e, "Analytics export failed"), req);
+    }
+  }));
+
+  // Goal achievement: avg % of members hitting calorie + macro targets
+  app.get("/api/v1/analytics/goal-achievement", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          COUNT(DISTINCT ml.user_id)::int AS members_tracked,
+          ROUND(
+            AVG(CASE
+              WHEN hp.target_calories IS NOT NULL AND hp.target_calories > 0
+              THEN LEAST(ml.total_calories / hp.target_calories, 1.5) * 100
+              ELSE NULL END
+            )::numeric, 1
+          ) AS avg_calorie_achievement_pct,
+          ROUND(
+            AVG(CASE
+              WHEN hp.target_protein_g IS NOT NULL AND hp.target_protein_g > 0
+              THEN LEAST(ml.total_protein_g / hp.target_protein_g, 1.5) * 100
+              ELSE NULL END
+            )::numeric, 1
+          ) AS avg_protein_achievement_pct,
+          ROUND(
+            AVG(CASE
+              WHEN hp.target_carbs_g IS NOT NULL AND hp.target_carbs_g > 0
+              THEN LEAST(ml.total_carbs_g / hp.target_carbs_g, 1.5) * 100
+              ELSE NULL END
+            )::numeric, 1
+          ) AS avg_carbs_achievement_pct
+        FROM (
+          SELECT user_id, logged_date,
+            COALESCE(SUM(calories), 0) AS total_calories,
+            COALESCE(SUM(protein_g), 0) AS total_protein_g,
+            COALESCE(SUM(carbs_g), 0) AS total_carbs_g
+          FROM gold.meal_logs
+          WHERE logged_date >= now() - (${days}::text || ' days')::interval
+          GROUP BY user_id, logged_date
+        ) ml
+        JOIN gold.b2b_customers c ON c.id = ml.user_id
+        LEFT JOIN gold.b2c_customer_health_profiles hp ON hp.customer_id = ml.user_id
+        WHERE c.vendor_id = ${vendorId}::uuid
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const row = (result.rows?.[0] as any) ?? {};
+      ok(res, {
+        members_tracked: row.members_tracked ?? 0,
+        avg_calorie_achievement_pct: row.avg_calorie_achievement_pct ?? null,
+        avg_protein_achievement_pct: row.avg_protein_achievement_pct ?? null,
+        avg_carbs_achievement_pct: row.avg_carbs_achievement_pct ?? null,
+        days,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Goal achievement failed"), req);
+    }
+  }));
+
+  // Top-rated recipes per partner (B2B-020)
+  app.get("/api/v1/analytics/top-recipes", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit || "10"), 10)));
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          r.id,
+          r.name,
+          r.description,
+          r.image_url,
+          ROUND(AVG(rr.rating)::numeric, 2) AS avg_rating,
+          COUNT(rr.id)::int AS rating_count
+        FROM gold.recipe_ratings rr
+        JOIN gold.recipes r ON r.id = rr.recipe_id
+        JOIN gold.b2c_customers bc ON bc.id = rr.user_id
+        JOIN gold.b2b_customers c ON c.id = bc.id
+        WHERE c.vendor_id = ${vendorId}::uuid
+        GROUP BY r.id, r.name, r.description, r.image_url
+        HAVING COUNT(rr.id) >= 1
+        ORDER BY avg_rating DESC, rating_count DESC
+        LIMIT ${limit}
+      `).catch(() => ({ rows: [] as any[] }));
+
+      ok(res, { recipes: result.rows ?? [], limit });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Top recipes failed"), req);
     }
   }));
 
@@ -1185,13 +1328,23 @@ export function registerRoutes(app: Express) {
     let logoUrl: string | null = null;
     let faviconUrl: string | null = null;
     let primaryColor: string | null = null;
+    let secondaryColor: string | null = null;
+    let accentColor: string | null = null;
+    let welcomeMessage: string | null = null;
+    let fontUrl: string | null = null;
+    let ga4MeasurementId: string | null = null;
     let copyrightText = (process.env.VENDOR_COPYRIGHT ?? "").trim() || GENERIC_COPYRIGHT;
 
     if (vendorId) {
       const brandingRows = await db.execute(sql`
         SELECT key, value FROM gold.system_settings
         WHERE vendor_id = ${vendorId}::uuid
-          AND key IN ('branding.logo_url', 'branding.favicon_url', 'branding.primary_color', 'branding.copyright')
+          AND key IN (
+            'branding.logo_url', 'branding.favicon_url',
+            'branding.primary_color', 'branding.secondary_color', 'branding.accent_color',
+            'branding.copyright', 'branding.welcome_message', 'branding.font_url',
+            'integration.ga4_measurement_id'
+          )
       `).catch(() => ({ rows: [] as any[] }));
 
       for (const r of (brandingRows.rows ?? []) as any[]) {
@@ -1199,11 +1352,16 @@ export function registerRoutes(app: Express) {
         if (r.key === "branding.logo_url" && val) logoUrl = val;
         if (r.key === "branding.favicon_url" && val) faviconUrl = val;
         if (r.key === "branding.primary_color" && val) primaryColor = val;
+        if (r.key === "branding.secondary_color" && val) secondaryColor = val;
+        if (r.key === "branding.accent_color" && val) accentColor = val;
         if (r.key === "branding.copyright" && val) copyrightText = val;
+        if (r.key === "branding.welcome_message" && val) welcomeMessage = val;
+        if (r.key === "branding.font_url" && val) fontUrl = val;
+        if (r.key === "integration.ga4_measurement_id" && val) ga4MeasurementId = val;
       }
     }
 
-    ok(res, { vendorName, copyrightText, logoUrl, faviconUrl, primaryColor });
+    ok(res, { vendorName, copyrightText, logoUrl, faviconUrl, primaryColor, secondaryColor, accentColor, welcomeMessage, fontUrl, ga4MeasurementId });
   });
 
   // metrics
@@ -1323,8 +1481,6 @@ export function registerRoutes(app: Express) {
             trace_id: traceId,
             code: "appwrite_membership_create_failed",
             slug: resolvedSlug,
-            team_id: team.teamId,
-            owner_user_id: appwriteUser.id,
             rollback: true,
             error: err?.message || String(err),
           })
@@ -1359,8 +1515,6 @@ export function registerRoutes(app: Express) {
             trace_id: traceId,
             code: "appwrite_vendor_create_failed",
             slug: resolvedSlug,
-            team_id: team.teamId,
-            owner_user_id: appwriteUser.id,
             rollback: true,
             error: err?.message || String(err),
           })
@@ -1443,8 +1597,6 @@ export function registerRoutes(app: Express) {
             trace_id: traceId,
             code: "supabase_insert_failed_rolled_back",
             slug: resolvedSlug,
-            team_id: createdTeamId,
-            owner_user_id: appwriteUser.id,
             rollback: true,
             rollback_error: rollbackError || null,
             error: err?.message || String(err),
@@ -1465,8 +1617,6 @@ export function registerRoutes(app: Express) {
           trace_id: traceId,
           code: "appwrite_team_create_failed",
           slug: resolvedSlug || null,
-          team_id: createdTeamId,
-          owner_user_id: appwriteUser.id,
           rollback: Boolean(createdTeamId),
           error: err?.message || String(err),
         })
@@ -1609,7 +1759,65 @@ export function registerRoutes(app: Express) {
     });
     if (ragResult?.customers?.length) return ok(res, ragResult);
 
-    return ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+    // SQL fallback: find customers in this vendor who have no allergen conflicts with this product.
+    // Mirrors the customer-to-product SQL fallback (matching/:customerId) using the same junction tables.
+    try {
+      const fallbackRows = await db.execute(sql`
+        SELECT
+          c.id,
+          c.email,
+          c.full_name                                                    AS customer_name,
+          COALESCE(
+            (SELECT COUNT(*)::int
+             FROM gold.b2b_customer_allergens ca
+             JOIN gold.product_allergens pa ON pa.allergen_id = ca.allergen_id
+             WHERE ca.b2b_customer_id = c.id
+               AND pa.product_id = ${productId}::uuid
+               AND ca.is_active = true),
+            0
+          )                                                               AS allergen_conflicts,
+          COALESCE(
+            (SELECT COUNT(*)::int
+             FROM gold.b2b_customer_dietary_preferences cdp
+             JOIN gold.product_dietary_preferences pdp ON pdp.diet_id = cdp.diet_id
+             WHERE cdp.b2b_customer_id = c.id
+               AND pdp.product_id = ${productId}::uuid
+               AND cdp.is_active = true
+               AND pdp.is_compatible = true),
+            0
+          )                                                               AS diet_matches
+        FROM gold.b2b_customers c
+        WHERE c.vendor_id = ${vendorId}::uuid
+          AND c.account_status = 'active'
+        ORDER BY allergen_conflicts ASC, diet_matches DESC
+        LIMIT ${limit}
+      `);
+
+      // HIPAA: health-derived fields (safety_status, reasons, warnings) must not be returned.
+      // Customers with allergen conflicts are excluded entirely — their absence reveals nothing.
+      const customers = (fallbackRows.rows as any[])
+        .filter((r) => parseInt(String(r.allergen_conflicts ?? "0"), 10) === 0)
+        .map((r) => {
+          const dietMatches = parseInt(String(r.diet_matches ?? "0"), 10);
+          return {
+            id: r.id,
+            customer_id: r.id,
+            name: r.customer_name,
+            customer_name: r.customer_name,
+            email: r.email,
+            match_score: Math.min(1, dietMatches / 5),
+          };
+        });
+
+      return ok(res, {
+        customers,
+        summary: { total_matched: customers.length },
+        fallback: true,
+      });
+    } catch (sqlErr: any) {
+      console.error("[matching-customers] SQL fallback error:", sqlErr?.message);
+      return ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+    }
   }));
 
   // Product-to-customer matching (PRD-04): which customers can safely use this product
@@ -1631,7 +1839,63 @@ export function registerRoutes(app: Express) {
     });
     if (ragResult?.customers?.length) return ok(res, ragResult);
 
-    ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+    // SQL fallback — same logic as the POST variant above
+    try {
+      const fallbackRows = await db.execute(sql`
+        SELECT
+          c.id,
+          c.email,
+          c.full_name                                                    AS customer_name,
+          COALESCE(
+            (SELECT COUNT(*)::int
+             FROM gold.b2b_customer_allergens ca
+             JOIN gold.product_allergens pa ON pa.allergen_id = ca.allergen_id
+             WHERE ca.b2b_customer_id = c.id
+               AND pa.product_id = ${productId}::uuid
+               AND ca.is_active = true),
+            0
+          )                                                               AS allergen_conflicts,
+          COALESCE(
+            (SELECT COUNT(*)::int
+             FROM gold.b2b_customer_dietary_preferences cdp
+             JOIN gold.product_dietary_preferences pdp ON pdp.diet_id = cdp.diet_id
+             WHERE cdp.b2b_customer_id = c.id
+               AND pdp.product_id = ${productId}::uuid
+               AND cdp.is_active = true
+               AND pdp.is_compatible = true),
+            0
+          )                                                               AS diet_matches
+        FROM gold.b2b_customers c
+        WHERE c.vendor_id = ${vendorId}::uuid
+          AND c.account_status = 'active'
+        ORDER BY allergen_conflicts ASC, diet_matches DESC
+        LIMIT ${limit}
+      `);
+
+      // HIPAA: health-derived fields must not be returned. Exclude customers with allergen conflicts.
+      const customers = (fallbackRows.rows as any[])
+        .filter((r) => parseInt(String(r.allergen_conflicts ?? "0"), 10) === 0)
+        .map((r) => {
+          const dietMatches = parseInt(String(r.diet_matches ?? "0"), 10);
+          return {
+            id: r.id,
+            customer_id: r.id,
+            name: r.customer_name,
+            customer_name: r.customer_name,
+            email: r.email,
+            match_score: Math.min(1, dietMatches / 5),
+          };
+        });
+
+      return ok(res, {
+        customers,
+        summary: { total_matched: customers.length },
+        fallback: true,
+      });
+    } catch (sqlErr: any) {
+      console.error("[matching-customers GET] SQL fallback error:", sqlErr?.message);
+      ok(res, { customers: [], fallback: true, message: "Matching engine unavailable" });
+    }
   }));
 
   // PRD-09: POST /api/v1/products/:id/substitutions (body: customer_id, limit)
@@ -1814,6 +2078,57 @@ export function registerRoutes(app: Express) {
       return ok(res, { ok: true });
     } catch (err: any) {
       return problem(res, 500, safeErrorDetail(err, "Failed to delete product"), req);
+    }
+  }));
+
+  // customer list export (CSV)
+  app.get("/api/v1/customers/export", withAuth(async (req: any, res) => {
+    try {
+      const vendorId = req.auth?.vendorId;
+      if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+      const result = await db.execute(sql`
+        SELECT
+          c.id,
+          c.first_name,
+          c.last_name,
+          c.email,
+          c.account_status,
+          c.ingest_source,
+          c.created_at,
+          COALESCE(pqs.quality_score::text, '') AS quality_score
+        FROM gold.b2b_customers c
+        LEFT JOIN LATERAL (
+          SELECT quality_score FROM gold.product_quality_scores
+          WHERE vendor_id = c.vendor_id
+          ORDER BY created_at DESC LIMIT 1
+        ) pqs ON true
+        WHERE c.vendor_id = ${vendorId}::uuid
+        ORDER BY c.created_at DESC
+        LIMIT 10000
+      `);
+
+      const rows = result.rows as any[];
+      const escape = (v: any) => {
+        const s = String(v ?? "").replace(/"/g, '""');
+        return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s}"` : s;
+      };
+      const header = ["id", "first_name", "last_name", "email", "status", "ingest_source", "created_at", "quality_score"];
+      const lines = [
+        header.join(","),
+        ...rows.map((r) =>
+          [r.id, r.first_name, r.last_name, r.email, r.account_status, r.ingest_source, r.created_at, r.quality_score]
+            .map(escape)
+            .join(",")
+        ),
+      ];
+
+      const filename = `members-${new Date().toISOString().slice(0, 10)}.csv`;
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      return res.send(lines.join("\n"));
+    } catch (err: any) {
+      return problem(res, 500, safeErrorDetail(err, "Export failed"), req);
     }
   }));
 
@@ -2174,7 +2489,7 @@ export function registerRoutes(app: Express) {
       emitWebhookEvent(vendorId, "customer.updated", { customerId: id }).catch(() => {});
       return ok(res, result);
     } catch (e: any) {
-      console.error("[PATCH /customers/:id]", e);
+      console.error("[PATCH /customers/:id]", e?.message || e);
       return problem(res, 400, e?.message || "Update failed", req);
     }
   }));

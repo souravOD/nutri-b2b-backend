@@ -4,6 +4,7 @@ import { db } from "../lib/database.js";
 import { safeErrorDetail } from "../lib/safe-error.js";
 import { sql } from "drizzle-orm";
 import { Client, Databases, Query, Teams } from "node-appwrite";
+import { emitWebhookEvent } from "../lib/webhooks.js";
 
 const router = Router();
 
@@ -90,6 +91,7 @@ router.get(
                         ul.role,
                         ul.status,
                         ul.vendor_id,
+                        NULL AS membership_expires_at,
                         ul.created_at,
                         ul.updated_at
                     FROM gold.b2b_user_links ul
@@ -109,6 +111,7 @@ router.get(
                         ul.role,
                         ul.status,
                         ul.vendor_id,
+                        NULL AS membership_expires_at,
                         ul.created_at,
                         ul.updated_at
                     FROM gold.b2b_user_links ul
@@ -124,6 +127,7 @@ router.get(
                 displayName: r.display_name,
                 role: r.role,
                 status: r.status,
+                membershipExpiresAt: r.membership_expires_at ?? null,
                 linkedAt: r.created_at,
             }));
 
@@ -208,10 +212,10 @@ router.patch(
         try {
             const auth: AuthContext = (req as any).auth;
             const { userId } = req.params;
-            const { role } = req.body;
+            const { role, membershipExpiresAt } = req.body;
 
             // Validate role
-            const validRoles = ["vendor_admin", "vendor_operator", "vendor_viewer"];
+            const validRoles = ["vendor_admin", "vendor_operator", "vendor_viewer", "wellness_manager", "marketing_manager"];
             if (!role || !validRoles.includes(role)) {
                 return problem(res, 400, `Invalid role. Must be one of: ${validRoles.join(", ")}`);
             }
@@ -254,13 +258,27 @@ router.patch(
                 }
             }
 
-            // 1) Update Supabase b2b_user_links
+            // 1) Update Supabase b2b_user_links — role update always runs
             await db.execute(sql`
                 UPDATE gold.b2b_user_links
-                SET role = ${role}, updated_at = now()
+                SET role = ${role},
+                    updated_at = now()
                 WHERE user_id = ${userId}::uuid
                   AND vendor_id = ${vendorId}::uuid
             `);
+
+            // 1b) Best-effort: set membership_expires_at (silently skipped if column not yet migrated)
+            const expiresAt = membershipExpiresAt ? new Date(membershipExpiresAt) : null;
+            try {
+                await db.execute(sql`
+                    UPDATE gold.b2b_user_links
+                    SET membership_expires_at = ${expiresAt}
+                    WHERE user_id = ${userId}::uuid
+                      AND vendor_id = ${vendorId}::uuid
+                `);
+            } catch {
+                /* membership_expires_at column not yet migrated to DB — skip silently */
+            }
 
             // 2) Dual-write: Update Appwrite user_profiles document (non-fatal)
             const profilesCol = getUserProfilesCol();
@@ -309,7 +327,7 @@ router.patch(
                 }
             }
 
-            return res.json({ userId, role, updated: true });
+            return res.json({ userId, role, membershipExpiresAt: expiresAt, updated: true });
         } catch (err: any) {
             console.error("[PATCH /users/:userId/role]", err);
             return problem(res, 500, safeErrorDetail(err, "Failed to update role"));
@@ -633,12 +651,33 @@ router.delete(
                     WHERE user_id = ${userId}::uuid
                       AND vendor_id = ${vendorId}::uuid
                 `);
+                // Delete health profiles
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_customer_health_profiles
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => {});
+                // Delete customer tags
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_customer_tags
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => {});
+                // Delete product matches
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_product_matches
+                    WHERE customer_id = ${userId}::uuid
+                `).catch(() => {});
                 // Nullify user references in audit_log (keep entries, remove identity)
                 await tx.execute(sql`
                     UPDATE gold.audit_log
                     SET user_id = NULL
                     WHERE user_id = ${userId}::uuid
                 `).catch(() => { /* column may not be nullable in all deployments */ });
+                // Log the deletion
+                await tx.execute(sql`
+                    INSERT INTO gold.gdpr_deletion_log (user_id, vendor_id, anonymised_email, deleted_at)
+                    VALUES (${userId}::uuid, ${vendorId}::uuid, ${anonymisedEmail}, now())
+                    ON CONFLICT DO NOTHING
+                `).catch(() => { /* table may not exist in all deployments */ });
             });
 
             // Best-effort: remove from Appwrite team
@@ -659,6 +698,12 @@ router.delete(
                     console.warn("[DELETE /users/:userId/purge] Appwrite cleanup skipped:", awErr?.message);
                 }
             }
+
+            // Emit member.deprovisioned webhook
+            emitWebhookEvent(vendorId, "member.deprovisioned", {
+                userId,
+                anonymisedEmail,
+            }).catch(() => {});
 
             return res.json({ userId, purged: true, anonymisedEmail });
         } catch (err: any) {

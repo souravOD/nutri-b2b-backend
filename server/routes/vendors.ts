@@ -5,8 +5,9 @@
 import { Router, type Request, type Response } from "express";
 import { requireAuth, requirePermissionMiddleware } from "../lib/auth.js";
 import { db } from "../lib/database.js";
-import { sql } from "drizzle-orm";
+import { sql, eq, and, count } from "drizzle-orm";
 import { Client, Databases, Query } from "node-appwrite";
+import { webhookEndpoints } from "../../shared/schema.js";
 
 const router = Router();
 
@@ -431,10 +432,9 @@ router.get(
                     SELECT COUNT(*)::int AS count FROM gold.api_keys
                     WHERE vendor_id = ${vendorId}::uuid AND revoked_at IS NULL AND is_active = true
                 `),
-                db.execute(sql`
-                    SELECT COUNT(*)::int AS count FROM gold.b2b_webhooks
-                    WHERE vendor_id = ${vendorId}::uuid AND is_active = true
-                `),
+                db.select({ count: count() })
+                    .from(webhookEndpoints)
+                    .where(and(eq(webhookEndpoints.vendorId, vendorId), eq(webhookEndpoints.enabled, true))),
                 db.execute(sql`
                     SELECT COUNT(*)::int AS count FROM gold.b2b_ip_allowlist
                     WHERE vendor_id = ${vendorId}::uuid AND is_active = true
@@ -444,7 +444,7 @@ router.get(
             return res.json({
                 config: {
                     apiKeyCount: (apiKeysResult.rows?.[0] as any)?.count ?? 0,
-                    webhookCount: (webhooksResult.rows?.[0] as any)?.count ?? 0,
+                    webhookCount: (webhooksResult[0] as any)?.count ?? 0,
                     ipAllowlistCount: (ipAllowlistResult.rows?.[0] as any)?.count ?? 0,
                 },
             });

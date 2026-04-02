@@ -17,6 +17,8 @@ const ALLOWED_EVENTS = [
   "compliance.alert",
   "customer.profile.updated",
   "quality.score.low",
+  "member.provisioned",
+  "member.deprovisioned",
 ];
 
 function ok(res: any, data: any) {

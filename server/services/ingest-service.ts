@@ -305,7 +305,11 @@ export async function triggerOrchestrator(params: {
  * Returns null if the run is not found (404).
  */
 export async function getOrchestrationRunStatus(runId: string): Promise<any | null> {
-    const res = await fetch(`${ORCHESTRATOR_URL}/api/runs/${runId}`);
+    const res = await fetch(`${ORCHESTRATOR_URL}/api/runs/${runId}`, {
+        headers: {
+            ...(ORCHESTRATOR_SECRET ? { "Authorization": `Bearer ${ORCHESTRATOR_SECRET}` } : {}),
+        },
+    });
     if (!res.ok) {
         if (res.status === 404) return null;
         throw new Error(`Orchestrator status check failed (${res.status})`);

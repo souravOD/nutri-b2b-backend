@@ -5,6 +5,7 @@ import { db } from "../lib/database.js";
 import { safeErrorDetail } from "../lib/safe-error.js";
 import { sql } from "drizzle-orm";
 import { Client, Databases, ID, Query, Teams, Users } from "node-appwrite";
+import { emitWebhookEvent } from "../lib/webhooks.js";
 
 const router = Router();
 
@@ -522,6 +523,13 @@ router.post(
                 // Non-fatal — /onboard/self can still fix this on next login
                 console.warn("[set-password] b2b_users activation skipped:", activateErr?.message);
             }
+
+            // 7b) Emit member.provisioned webhook
+            emitWebhookEvent(inv.vendor_id, "member.provisioned", {
+                userId,
+                email: inv.email,
+                role: inv.role,
+            }).catch(() => {});
 
             // 8) Upsert Appwrite user_profiles with the correct vendor info
             try {
