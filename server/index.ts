@@ -1,4 +1,4 @@
-import express, { type Request, type Response, type NextFunction } from "express";
+import express, { type Request, type Response, type NextFunction, type RequestHandler } from "express";
 import helmet from "helmet";
 import "dotenv/config";
 import http from "http";
@@ -11,6 +11,7 @@ import onboardRouter from "./routes/onboard.js";
 import invitationsRouter from "./routes/invitations.js";
 import { startRevocationCron } from "./lib/revocation-cron.js";
 import { openApiSpec } from "./lib/openapi.js";
+import { requireAuth } from "./lib/auth.js";
 
 const PORT = Number(process.env.PORT || 5000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -28,9 +29,24 @@ export default app;
   // Swagger UI (B2B-061) — gated by superadmin JWT or SWAGGER_ENABLED env flag
   const swaggerEnabled = process.env.SWAGGER_ENABLED === "true" || isDev;
   if (swaggerEnabled) {
-    app.get("/api/docs/spec", (_req: Request, res: Response) => res.json(openApiSpec));
+    // In production, require a valid superadmin JWT before serving docs.
+    // In dev, the guard array is empty so docs are open for convenience.
+    const swaggerGuard: RequestHandler[] = isDev
+      ? []
+      : [
+          requireAuth as RequestHandler,
+          ((req: Request, res: Response, next: NextFunction) => {
+            if ((req as any).auth?.role !== "superadmin") {
+              return res.status(403).json({ error: "Superadmin access required for API docs" });
+            }
+            next();
+          }) as RequestHandler,
+        ];
+
+    app.get("/api/docs/spec", ...swaggerGuard, (_req: Request, res: Response) => res.json(openApiSpec));
     app.use(
       "/api/docs",
+      ...swaggerGuard,
       swaggerUi.serve,
       swaggerUi.setup(openApiSpec as any, {
         customSiteTitle: "Nutri B2B API Docs",

@@ -920,13 +920,13 @@ export class DatabaseStorage implements IStorage {
           (avoidAllergens.length > 0 && allergenIds.length === 0) ||
           (dietGoals.length > 0 && dietIds.length === 0);
         if (resolutionFailed) {
-          console.warn("[upsertCustomerHealth] taxonomy resolution returned empty for some inputs:", {
-            conditions,
-            conditionIds,
-            avoidAllergens,
-            allergenIds,
-            dietGoals,
-            dietIds,
+          console.warn("[upsertCustomerHealth] taxonomy resolution returned empty for some inputs", {
+            conditionCount: conditions.length,
+            resolvedConditionCount: conditionIds.length,
+            allergenCount: avoidAllergens.length,
+            resolvedAllergenCount: allergenIds.length,
+            dietGoalCount: dietGoals.length,
+            resolvedDietGoalCount: dietIds.length,
           });
         }
       }
