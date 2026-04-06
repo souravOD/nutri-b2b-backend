@@ -9,6 +9,7 @@ import rolePermissionsRouter from "./routes/role-permissions.js";
 import auditRouter from "./routes/audit.js";
 import qualityRouter from "./routes/quality.js";
 import alertsRouter from "./routes/alerts.js";
+import campaignsRouter from "./routes/campaigns.js";
 import complianceRouter from "./routes/compliance.js";
 import profileRouter from "./routes/profile.js";
 import webhooksRouter from "./routes/webhooks.js";
@@ -401,6 +402,9 @@ export function registerRoutes(app: Express) {
 
   // ── Alerts ──
   app.use("/api/alerts", alertsRouter);
+
+  // ── Campaigns ──
+  app.use("/api/v1/campaigns", campaignsRouter);
 
   // ── Compliance ──
   app.use("/api/compliance", complianceRouter);
@@ -1287,6 +1291,65 @@ export function registerRoutes(app: Express) {
       ok(res, { recipes: result.rows ?? [], limit });
     } catch (e: any) {
       problem(res, 500, safeErrorDetail(e, "Top recipes failed"), req);
+    }
+  }));
+
+  // NPS: submit score + get aggregate analytics
+  app.post("/api/v1/nps", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const { score, comment, respondent_key } = req.body || {};
+    const parsedScore = parseInt(String(score), 10);
+    if (isNaN(parsedScore) || parsedScore < 1 || parsedScore > 10) {
+      return problem(res, 400, "score must be an integer between 1 and 10", req);
+    }
+    try {
+      await db.execute(sql`
+        INSERT INTO gold.b2b_nps_responses (vendor_id, score, comment, respondent_key)
+        VALUES (${vendorId}::uuid, ${parsedScore}, ${comment?.trim() || null}, ${respondent_key?.trim() || null})
+      `);
+      ok(res, { ok: true });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Failed to save NPS response"), req);
+    }
+  }));
+
+  app.get("/api/v1/analytics/nps", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "90"), 10) || 90, 7), 365);
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          COUNT(*)::int AS total_responses,
+          ROUND(AVG(score)::numeric, 1) AS avg_score,
+          COUNT(*) FILTER (WHERE score >= 9)::int AS promoters,
+          COUNT(*) FILTER (WHERE score <= 6)::int AS detractors,
+          COUNT(*) FILTER (WHERE score BETWEEN 7 AND 8)::int AS passives
+        FROM gold.b2b_nps_responses
+        WHERE vendor_id = ${vendorId}::uuid
+          AND created_at >= now() - (${days}::text || ' days')::interval
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const row = (result.rows?.[0] as any) ?? {};
+      const total = row.total_responses ?? 0;
+      const promoters = row.promoters ?? 0;
+      const detractors = row.detractors ?? 0;
+      const npsScore = total >= 5
+        ? Math.round((promoters / total - detractors / total) * 100)
+        : null;
+
+      ok(res, {
+        total_responses: total,
+        avg_score: row.avg_score ?? null,
+        promoters,
+        passives: row.passives ?? 0,
+        detractors,
+        nps_score: npsScore,
+        days,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "NPS analytics failed"), req);
     }
   }));
 

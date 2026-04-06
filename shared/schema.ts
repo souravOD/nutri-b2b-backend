@@ -683,6 +683,32 @@ export const b2bAlerts = gold.table("b2b_alerts", {
   statusIdx: index("idx_b2b_alerts_status").on(table.status),
 }));
 
+export const b2bNpsResponses = gold.table("b2b_nps_responses", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  score: integer("score").notNull(),
+  comment: text("comment"),
+  respondentKey: text("respondent_key"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_nps_vendor_created").on(table.vendorId, table.createdAt),
+}));
+
+export const b2bCampaigns = gold.table("b2b_campaigns", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  name: text("name").notNull(),
+  targetSegment: text("target_segment").notNull().default("all"),
+  subject: text("subject").notNull(),
+  message: text("message").notNull(),
+  status: text("status").notNull().default("draft"),
+  sentAt: timestamp("sent_at"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_campaigns_vendor").on(table.vendorId, table.createdAt),
+}));
+
 export const ipAllowlist = gold.table("b2b_ip_allowlist", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   vendorId: uuid("vendor_id").notNull().references(() => vendors.id),

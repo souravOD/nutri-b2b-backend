@@ -221,6 +221,7 @@ router.get(
                 WHERE vendor_id = ${vendorId}::uuid
                   AND type = 'system'
                   AND status != 'dismissed'
+                  AND (display_until IS NULL OR display_until > now())
                 ORDER BY created_at DESC
                 LIMIT 3
             `);
@@ -229,6 +230,54 @@ router.get(
         } catch (err: any) {
             console.error("[alerts] GET /banners error:", err?.message || err);
             return res.status(500).json({ code: "internal_error", detail: "Failed to fetch banners" });
+        }
+    },
+);
+
+// ── POST /alerts ────────────────────────────────────────────────────────────
+// Create a new announcement (system alert) visible as a top-of-page banner.
+router.post(
+    "/",
+    requireAuth as any,
+    requirePermissionMiddleware("manage:settings") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const { title, description, priority = "medium", expiresIn } = req.body || {};
+            if (!title?.trim()) {
+                return res.status(400).json({ code: "bad_request", detail: "title is required" });
+            }
+            if (!VALID_PRIORITIES.includes(priority)) {
+                return res.status(400).json({ code: "bad_request", detail: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
+            }
+
+            let displayUntil: string | null = null;
+            if (expiresIn === "1d") displayUntil = new Date(Date.now() + 86_400_000).toISOString();
+            else if (expiresIn === "3d") displayUntil = new Date(Date.now() + 3 * 86_400_000).toISOString();
+            else if (expiresIn === "7d") displayUntil = new Date(Date.now() + 7 * 86_400_000).toISOString();
+
+            const result = await db.execute(sql`
+                INSERT INTO gold.b2b_alerts (vendor_id, type, priority, title, description, display_until)
+                VALUES (
+                    ${vendorId}::uuid,
+                    'system',
+                    ${priority},
+                    ${String(title).slice(0, 255)},
+                    ${description?.trim() || null},
+                    ${displayUntil ? sql`${displayUntil}::timestamptz` : sql`NULL`}
+                )
+                RETURNING id, title, description, priority, status, created_at
+            `);
+
+            return res.status(201).json({ ok: true, alert: result.rows?.[0] });
+        } catch (err: any) {
+            console.error("[alerts] POST / error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to create announcement" });
         }
     },
 );
