@@ -44,6 +44,7 @@ import { safeErrorDetail } from "./lib/safe-error.js";
 import { ipAllowlistMiddleware } from "./middleware/ipAllowlist.js";
 import multer from "multer";
 import { ensureBucket } from "./lib/supabase.js";
+import PDFDocument from "pdfkit";
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CSV_BUCKET = process.env.SUPABASE_CSV_BUCKET ?? "ingestion";
@@ -892,8 +893,168 @@ export function registerRoutes(app: Express) {
 
     const type = String(req.query.type || "overview");
     const days = Math.min(Math.max(parseInt(String(req.query.days || "30"), 10) || 30, 7), 90);
+    const format = String(req.query.format || "csv").toLowerCase();
 
     try {
+      // ── PDF: combined multi-section report ────────────────────────────────
+      if (format === "pdf") {
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const [ovProducts, ovCustomers, ovRuns, hlAllergens, hlConditions, hlDiets, engRow] = await Promise.all([
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS new_products
+            FROM gold.products WHERE vendor_id = ${vendorId}::uuid
+              AND created_at >= now() - (${days}::text || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, COUNT(*)::int AS new_customers
+            FROM gold.b2b_customers WHERE vendor_id = ${vendorId}::uuid
+              AND created_at >= now() - (${days}::text || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE status = 'completed')::int AS completed
+            FROM public.ingestion_jobs WHERE vendor_id = ${vendorId}::uuid
+          `).catch(() => ({ rows: [{ total: 0, completed: 0 }] as any[] })),
+          db.execute(sql`
+            SELECT a.name, COUNT(DISTINCT ca.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_allergens ca
+            JOIN gold.allergens a ON ca.allergen_id = a.id
+            JOIN gold.b2b_customers c ON ca.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY a.name HAVING COUNT(DISTINCT ca.b2b_customer_id) >= 5
+            ORDER BY customer_count DESC LIMIT 10
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT hc.name, COUNT(DISTINCT chc.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_health_conditions chc
+            JOIN gold.health_conditions hc ON chc.condition_id = hc.id
+            JOIN gold.b2b_customers c ON chc.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY hc.name HAVING COUNT(DISTINCT chc.b2b_customer_id) >= 5
+            ORDER BY customer_count DESC LIMIT 10
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT dp.name, COUNT(DISTINCT cdp.b2b_customer_id)::int AS customer_count
+            FROM gold.b2b_customer_dietary_preferences cdp
+            JOIN gold.dietary_preferences dp ON cdp.diet_id = dp.id
+            JOIN gold.b2b_customers c ON cdp.b2b_customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY dp.name HAVING COUNT(DISTINCT cdp.b2b_customer_id) >= 5
+            ORDER BY customer_count DESC LIMIT 10
+          `).catch(() => ({ rows: [] as any[] })),
+          db.execute(sql`
+            SELECT
+              COUNT(DISTINCT c.id)::int AS total_customers,
+              COUNT(DISTINCT hp.customer_id)::int AS with_profile,
+              ROUND(COUNT(DISTINCT hp.customer_id)::numeric / NULLIF(COUNT(DISTINCT c.id), 0) * 100, 1) AS activation_rate
+            FROM gold.b2b_customers c
+            LEFT JOIN gold.b2b_customer_health_profiles hp ON hp.customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid
+          `).catch(() => ({ rows: [{ total_customers: 0, with_profile: 0, activation_rate: 0 }] as any[] })),
+        ]);
+
+        const doc = new PDFDocument({ margin: 50, size: "A4" });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="analytics-report-${dateStr}.pdf"`);
+        doc.pipe(res);
+
+        const blue = "#00438f";
+        const gray = "#64748b";
+        const lightGray = "#f1f5f9";
+
+        // ── Cover ──
+        doc.rect(0, 0, doc.page.width, 120).fill(blue);
+        doc.fillColor("white").fontSize(24).font("Helvetica-Bold")
+          .text("Analytics Report", 50, 40, { align: "left" });
+        doc.fontSize(12).font("Helvetica")
+          .text(`Generated: ${dateStr}  ·  Period: Last ${days} days`, 50, 75);
+        doc.fillColor("#0f172a").moveDown(3);
+
+        const sectionTitle = (title: string) => {
+          doc.moveDown(0.5)
+            .fontSize(14).font("Helvetica-Bold").fillColor(blue)
+            .text(title)
+            .moveDown(0.3)
+            .moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y)
+            .strokeColor("#e2e8f0").lineWidth(1).stroke()
+            .moveDown(0.4);
+        };
+
+        const tableRow = (cols: string[], widths: number[], isHeader = false) => {
+          const startX = 50;
+          const rowH = 18;
+          const y = doc.y;
+          if (isHeader) doc.rect(startX, y, widths.reduce((a, b) => a + b, 0), rowH).fill(lightGray);
+          let x = startX;
+          cols.forEach((col, i) => {
+            doc.fillColor(isHeader ? gray : "#1e293b")
+              .fontSize(isHeader ? 9 : 10)
+              .font(isHeader ? "Helvetica-Bold" : "Helvetica")
+              .text(String(col), x + 4, y + 4, { width: widths[i] - 8, lineBreak: false });
+            x += widths[i];
+          });
+          doc.y = y + rowH + 2;
+        };
+
+        // ── Section 1: Overview ──
+        sectionTitle("1. Overview");
+        const runRow = (ovRuns.rows?.[0] as any) ?? { total: 0, completed: 0 };
+        doc.fontSize(10).font("Helvetica").fillColor("#1e293b");
+        doc.text(`Total ingestion jobs: ${runRow.total ?? 0}  ·  Completed: ${runRow.completed ?? 0}`).moveDown(0.5);
+
+        if ((ovProducts.rows ?? []).length > 0 || (ovCustomers.rows ?? []).length > 0) {
+          tableRow(["Date", "New Products", "New Customers"], [160, 160, 160], true);
+          const daySet = new Set<string>([
+            ...(ovProducts.rows ?? []).map((r: any) => String(r.day)),
+            ...(ovCustomers.rows ?? []).map((r: any) => String(r.day)),
+          ]);
+          const prodMap = new Map((ovProducts.rows ?? []).map((r: any) => [String(r.day), r.new_products ?? 0]));
+          const custMap = new Map((ovCustomers.rows ?? []).map((r: any) => [String(r.day), r.new_customers ?? 0]));
+          for (const d of Array.from(daySet).sort()) {
+            tableRow([d, String(prodMap.get(d) ?? 0), String(custMap.get(d) ?? 0)], [160, 160, 160]);
+            if (doc.y > doc.page.height - 80) { doc.addPage(); }
+          }
+        } else {
+          doc.fontSize(10).fillColor(gray).text("No data for this period.").moveDown(0.5);
+        }
+
+        // ── Section 2: Health ──
+        doc.addPage();
+        sectionTitle("2. Health Distribution");
+
+        const renderHealthTable = (title: string, rows: any[]) => {
+          doc.fontSize(11).font("Helvetica-Bold").fillColor("#1e293b").text(title).moveDown(0.3);
+          if (rows.length === 0) {
+            doc.fontSize(10).font("Helvetica").fillColor(gray).text("No data available (k-anonymity threshold not met).").moveDown(0.5);
+            return;
+          }
+          tableRow(["Name", "Members"], [320, 100], true);
+          for (const r of rows) {
+            tableRow([String(r.name ?? ""), String(r.customer_count ?? 0)], [320, 100]);
+            if (doc.y > doc.page.height - 80) { doc.addPage(); }
+          }
+          doc.moveDown(0.5);
+        };
+
+        renderHealthTable("Top Allergens", hlAllergens.rows ?? []);
+        renderHealthTable("Top Health Conditions", hlConditions.rows ?? []);
+        renderHealthTable("Top Dietary Preferences", hlDiets.rows ?? []);
+
+        // ── Section 3: Engagement ──
+        doc.addPage();
+        sectionTitle("3. Engagement");
+        const eng = (engRow.rows?.[0] as any) ?? { total_customers: 0, with_profile: 0, activation_rate: 0 };
+        doc.fontSize(10).font("Helvetica").fillColor("#1e293b");
+        doc.text(`Total customers: ${eng.total_customers ?? 0}`).moveDown(0.2);
+        doc.text(`With health profile: ${eng.with_profile ?? 0}`).moveDown(0.2);
+        doc.text(`Activation rate: ${eng.activation_rate ?? 0}%`).moveDown(0.8);
+
+        doc.end();
+        return;
+      }
+
       let rows: Record<string, unknown>[] = [];
       let filename = `analytics-${type}-${new Date().toISOString().slice(0, 10)}.csv`;
 
@@ -984,7 +1145,6 @@ export function registerRoutes(app: Express) {
         return res.status(200).send("No data available for the selected period.");
       }
 
-      const format = String(req.query.format || "csv").toLowerCase();
       const headers = Object.keys(rows[0]);
 
       if (format === "xlsx") {
@@ -1127,6 +1287,95 @@ export function registerRoutes(app: Express) {
       ok(res, { recipes: result.rows ?? [], limit });
     } catch (e: any) {
       problem(res, 500, safeErrorDetail(e, "Top recipes failed"), req);
+    }
+  }));
+
+  // ROI calculations: budget adherence, food waste reduction, health cost savings
+  app.get("/api/v1/analytics/roi", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    try {
+      const [activationRow, goalRow, savingsRow] = await Promise.all([
+        db.execute(sql`
+          SELECT
+            COUNT(DISTINCT c.id)::int AS total,
+            COUNT(DISTINCT hp.customer_id)::int AS with_profile
+          FROM gold.b2b_customers c
+          LEFT JOIN gold.b2b_customer_health_profiles hp ON hp.customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+        `).catch(() => ({ rows: [{ total: 0, with_profile: 0 }] as any[] })),
+        db.execute(sql`
+          SELECT ROUND(AVG(
+            CASE WHEN hp.target_calories IS NOT NULL AND hp.target_calories > 0
+            THEN LEAST(ml.total_calories / hp.target_calories, 1.5) * 100 END
+          )::numeric, 1) AS avg_calorie_pct
+          FROM (
+            SELECT user_id, COALESCE(SUM(calories), 0) AS total_calories
+            FROM gold.meal_logs
+            WHERE logged_date >= now() - '30 days'::interval
+            GROUP BY user_id
+          ) ml
+          JOIN gold.b2b_customers c ON c.id = ml.user_id
+          LEFT JOIN gold.b2c_customer_health_profiles hp ON hp.customer_id = ml.user_id
+          WHERE c.vendor_id = ${vendorId}::uuid
+        `).catch(() => ({ rows: [] as any[] })),
+        db.execute(sql`
+          SELECT value FROM gold.system_settings
+          WHERE vendor_id = ${vendorId}::uuid AND key = 'roi.savings_per_member' LIMIT 1
+        `).catch(() => ({ rows: [] as any[] })),
+      ]);
+
+      const ar = (activationRow.rows?.[0] as any) ?? { total: 0, with_profile: 0 };
+      const activatedMembers: number = ar.with_profile ?? 0;
+
+      const rawSavings = (savingsRow.rows?.[0] as any)?.value;
+      const savingsPerMember: number = (typeof rawSavings === "number" ? rawSavings
+        : typeof rawSavings === "string" ? parseFloat(rawSavings)
+        : typeof rawSavings === "object" && rawSavings !== null ? Number(Object.values(rawSavings)[0])
+        : NaN) || 1500;
+
+      const avgCaloriePct = (goalRow.rows?.[0] as any)?.avg_calorie_pct ?? null;
+
+      ok(res, {
+        budgetAdherence: avgCaloriePct !== null ? `${Math.min(Math.round(Number(avgCaloriePct)), 100)}%` : null,
+        foodWasteReduction: activatedMembers > 0 ? `$${(activatedMembers * 15).toLocaleString()}/mo` : null,
+        healthCostSavings: activatedMembers > 0 ? `$${(activatedMembers * savingsPerMember).toLocaleString()}/yr` : null,
+      });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "ROI calculation failed"), req);
+    }
+  }));
+
+  // Cohort retention: members grouped by join month, how many are still active
+  app.get("/api/v1/analytics/retention", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const days = Math.min(Math.max(parseInt(String(req.query.days || "180"), 10) || 180, 30), 365);
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          to_char(date_trunc('month', created_at), 'YYYY-MM') AS cohort_month,
+          COUNT(*)::int AS cohort_size,
+          COUNT(*) FILTER (WHERE account_status = 'active')::int AS retained_count
+        FROM gold.b2b_customers
+        WHERE vendor_id = ${vendorId}::uuid
+          AND created_at >= now() - (${days}::text || ' days')::interval
+        GROUP BY cohort_month
+        ORDER BY cohort_month
+      `).catch(() => ({ rows: [] as any[] }));
+
+      const cohorts = (result.rows ?? []).map((r: any) => ({
+        cohort_month: String(r.cohort_month),
+        cohort_size: r.cohort_size ?? 0,
+        retained_count: r.retained_count ?? 0,
+        retention_pct: (r.cohort_size ?? 0) > 0
+          ? Math.round(((r.retained_count ?? 0) / r.cohort_size) * 100)
+          : 0,
+      }));
+
+      ok(res, { cohorts, days });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Retention analytics failed"), req);
     }
   }));
 
