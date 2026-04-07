@@ -46,6 +46,7 @@ import { ipAllowlistMiddleware } from "./middleware/ipAllowlist.js";
 import multer from "multer";
 import { ensureBucket } from "./lib/supabase.js";
 import PDFDocument from "pdfkit";
+import * as XLSX from "xlsx";
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CSV_BUCKET = process.env.SUPABASE_CSV_BUCKET ?? "ingestion";
@@ -2393,11 +2394,12 @@ export function registerRoutes(app: Express) {
     }
   }));
 
-  // customer list export (CSV)
+  // customer list export (CSV or XLSX)
   app.get("/api/v1/customers/export", withAuth(async (req: any, res) => {
     try {
       const vendorId = req.auth?.vendorId;
       if (!vendorId) return problem(res, 403, "No vendor access", req);
+      const format = String(req.query.format ?? "csv").toLowerCase();
 
       const result = await db.execute(sql`
         SELECT
@@ -2421,11 +2423,33 @@ export function registerRoutes(app: Express) {
       `);
 
       const rows = result.rows as any[];
+      const header = ["id", "first_name", "last_name", "email", "status", "ingest_source", "created_at", "quality_score"];
+      const dateStr = new Date().toISOString().slice(0, 10);
+
+      if (format === "xlsx") {
+        const sheetData = [
+          header,
+          ...rows.map((r) => [
+            r.id, r.first_name, r.last_name, r.email,
+            r.account_status, r.ingest_source,
+            r.created_at ? new Date(r.created_at).toISOString() : "",
+            r.quality_score,
+          ]),
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(sheetData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Members");
+        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        res.setHeader("Content-Disposition", `attachment; filename="members-${dateStr}.xlsx"`);
+        return res.send(buf);
+      }
+
+      // default: CSV
       const escape = (v: any) => {
         const s = String(v ?? "").replace(/"/g, '""');
         return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s}"` : s;
       };
-      const header = ["id", "first_name", "last_name", "email", "status", "ingest_source", "created_at", "quality_score"];
       const lines = [
         header.join(","),
         ...rows.map((r) =>
@@ -2434,10 +2458,8 @@ export function registerRoutes(app: Express) {
             .join(",")
         ),
       ];
-
-      const filename = `members-${new Date().toISOString().slice(0, 10)}.csv`;
       res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Disposition", `attachment; filename="members-${dateStr}.csv"`);
       return res.send(lines.join("\n"));
     } catch (err: any) {
       return problem(res, 500, safeErrorDetail(err, "Export failed"), req);
