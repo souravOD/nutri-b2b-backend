@@ -1,12 +1,17 @@
-import express, { type Request, type Response, type NextFunction } from "express";
+import express, { type Request, type Response, type NextFunction, type RequestHandler } from "express";
+import helmet from "helmet";
 import "dotenv/config";
 import http from "http";
 import { logger } from "./lib/logger.js";
+import swaggerUi from "swagger-ui-express";
 
 import { registerRoutes } from "./routes.js";
 import { setupVite, serveStatic, log } from "./vite.js";
 import onboardRouter from "./routes/onboard.js";
 import invitationsRouter from "./routes/invitations.js";
+import { startRevocationCron } from "./lib/revocation-cron.js";
+import { openApiSpec } from "./lib/openapi.js";
+import { requireAuth } from "./lib/auth.js";
 
 const PORT = Number(process.env.PORT || 5000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -17,8 +22,39 @@ export const app = express();
 export default app;
 
 (async () => {
+  app.use(helmet());
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+
+  // Swagger UI (B2B-061) — gated by superadmin JWT or SWAGGER_ENABLED env flag
+  const swaggerEnabled = process.env.SWAGGER_ENABLED === "true" || isDev;
+  if (swaggerEnabled) {
+    // In production, require a valid superadmin JWT before serving docs.
+    // In dev, the guard array is empty so docs are open for convenience.
+    const swaggerGuard: RequestHandler[] = isDev
+      ? []
+      : [
+          requireAuth as RequestHandler,
+          ((req: Request, res: Response, next: NextFunction) => {
+            if ((req as any).auth?.role !== "superadmin") {
+              return res.status(403).json({ error: "Superadmin access required for API docs" });
+            }
+            next();
+          }) as RequestHandler,
+        ];
+
+    app.get("/api/docs/spec", ...swaggerGuard, (_req: Request, res: Response) => res.json(openApiSpec));
+    app.use(
+      "/api/docs",
+      ...swaggerGuard,
+      swaggerUi.serve,
+      swaggerUi.setup(openApiSpec as any, {
+        customSiteTitle: "Nutri B2B API Docs",
+        swaggerOptions: { persistAuthorization: true },
+      })
+    );
+    logger.info("Swagger UI available at /api/docs");
+  }
 
   // Allow known /api/* route prefixes through; catch unrecognised ones
   const knownApiPrefixes = [
@@ -32,6 +68,8 @@ export default app;
     "/api/compliance",                   // compliance checks
     "/api/profile",                      // user profile
     "/api/metrics",                      // metrics
+    "/api/config",                       // branding (public, no auth)
+    "/api/docs",                         // Swagger UI (B2B-061)
   ];
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {
@@ -97,7 +135,7 @@ export default app;
       res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
       res.header(
         "Access-Control-Allow-Headers",
-        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT, X-API-Key, Idempotency-Key"
+        "Authorization, Content-Type, X-Requested-With, X-Appwrite-JWT, X-API-Key, Idempotency-Key, X-Access-Reason"
       );
     };
 
@@ -106,7 +144,7 @@ export default app;
       return next();
     }
 
-    if (process.env.CORS_ALLOW_ALL === "1") {
+    if (process.env.CORS_ALLOW_ALL === "1" && isDev) {
       allow(origin);
       if (req.method === "OPTIONS") return res.sendStatus(204);
       return next();
@@ -149,6 +187,8 @@ export default app;
     serveStatic(app);
   }
 
+  startRevocationCron();
+
   server.listen(PORT, HOST, () => {
     logger.info(`Listening on http://${HOST}:${PORT}`);
     if (isDev) {
@@ -158,4 +198,7 @@ export default app;
     }
 
   });
-})();
+})().catch((err) => {
+  console.error("[startup] Fatal error:", err);
+  process.exit(1);
+});

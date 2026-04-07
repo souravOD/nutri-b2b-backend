@@ -70,8 +70,20 @@ router.get(
                 });
             }
 
+            const q = ((req.query.q as string) || "").trim();
+            const severityFilter = (req.query.severity as string) || null;
+            const validSeverities = ["critical", "warning", "info"];
+            const fromDate = (req.query.from_date as string) || null;
+            const toDate = (req.query.to_date as string) || null;
+
             const conditions = [sql`c.vendor_id = ${vendorId}::uuid`];
             if (statusFilter) conditions.push(sql`c.status = ${statusFilter}`);
+            if (q) conditions.push(sql`r.title ILIKE ${"%" + q + "%"}`);
+            if (severityFilter && validSeverities.includes(severityFilter)) {
+                conditions.push(sql`r.severity = ${severityFilter}`);
+            }
+            if (fromDate) conditions.push(sql`c.checked_at >= ${fromDate}::date`);
+            if (toDate) conditions.push(sql`c.checked_at < (${toDate}::date + interval '1 day')`);
             const where = sql.join(conditions, sql` AND `);
 
             const countResult = await db.execute(sql`
@@ -151,6 +163,71 @@ router.get(
     },
 );
 
+// ── GET /compliance/report ──────────────────────────────────────────────────
+// Export compliance check results as CSV
+router.get(
+    "/report",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT c.id, c.status, c.score, c.products_checked, c.products_failed,
+                       c.checked_at, c.next_review,
+                       r.title AS rule_title, r.regulation, r.severity
+                FROM gold.b2b_compliance_checks c
+                JOIN gold.b2b_compliance_rules r ON r.id = c.rule_id
+                WHERE c.vendor_id = ${vendorId}::uuid
+                ORDER BY c.checked_at DESC
+                LIMIT 500
+            `);
+
+            const rows = (result.rows || []) as any[];
+            const headers = ["Rule", "Regulation", "Status", "Score (%)", "Products Checked", "Products Failed", "Checked At", "Next Review"];
+            const escape = (s: string) => {
+                const str = String(s ?? "");
+                if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+                    return `"${str.replace(/"/g, '""')}"`;
+                }
+                return str;
+            };
+
+            const csvLines = [
+                headers.join(","),
+                ...rows.map((r) =>
+                    [
+                        escape(r.rule_title),
+                        escape(r.regulation),
+                        escape(r.status),
+                        escape(r.score),
+                        escape(r.products_checked),
+                        escape(r.products_failed),
+                        escape(r.checked_at ? new Date(r.checked_at).toISOString().slice(0, 10) : ""),
+                        escape(r.next_review ? new Date(r.next_review).toISOString().slice(0, 10) : ""),
+                    ].join(",")
+                ),
+            ];
+            const csv = csvLines.join("\n");
+
+            res.setHeader("Content-Type", "text/csv; charset=utf-8");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename="compliance-report-${new Date().toISOString().slice(0, 10)}.csv"`
+            );
+            return res.send(csv);
+        } catch (err: any) {
+            console.error("[compliance] GET /report error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to generate compliance report" });
+        }
+    },
+);
+
 // ── POST /compliance/run ────────────────────────────────────────────────────
 // Trigger compliance checks against vendor products for all active rules
 router.post(
@@ -186,7 +263,14 @@ router.post(
                     count(*) FILTER (WHERE allergens IS NOT NULL AND array_length(allergens, 1) > 0)::int AS with_allergens,
                     count(*) FILTER (WHERE ingredients IS NOT NULL AND array_length(ingredients, 1) > 0)::int AS with_ingredients,
                     count(*) FILTER (WHERE barcode IS NOT NULL AND btrim(barcode) != '')::int AS with_barcode,
-                    count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications
+                    count(*) FILTER (WHERE certifications IS NOT NULL AND array_length(certifications, 1) > 0)::int AS with_certifications,
+                    count(*) FILTER (WHERE image_url IS NOT NULL AND btrim(image_url) != '')::int AS with_image,
+                    count(*) FILTER (WHERE (serving_size IS NOT NULL AND btrim(serving_size) != '') OR serving_size_g IS NOT NULL)::int AS with_serving_size,
+                    count(*) FILTER (WHERE regulatory_codes IS NOT NULL AND array_length(regulatory_codes, 1) > 0)::int AS with_regulatory_codes,
+                    count(*) FILTER (WHERE country_of_origin IS NOT NULL AND btrim(country_of_origin) != '')::int AS with_country_of_origin,
+                    count(*) FILTER (WHERE manufacturer IS NOT NULL AND btrim(manufacturer) != '')::int AS with_manufacturer,
+                    count(*) FILTER (WHERE (calories IS NOT NULL) OR (total_fat_g IS NOT NULL) OR (sodium_mg IS NOT NULL) OR (total_carbs_g IS NOT NULL) OR (protein_g IS NOT NULL))::int AS with_inline_nutrition,
+                    count(*) FILTER (WHERE dietary_tags IS NOT NULL AND array_length(dietary_tags, 1) > 0)::int AS with_dietary_tags
                 FROM gold.products
                 WHERE vendor_id = ${vendorId}::uuid AND status = 'active'
                   AND soft_deleted_at IS NULL
@@ -344,6 +428,27 @@ export function evaluateRule(
             break;
         case "certification_check":
             withField = stats.with_certifications || 0;
+            break;
+        case "image_presence":
+            withField = stats.with_image || 0;
+            break;
+        case "serving_size_presence":
+            withField = stats.with_serving_size || 0;
+            break;
+        case "regulatory_codes_presence":
+            withField = stats.with_regulatory_codes || 0;
+            break;
+        case "country_of_origin_presence":
+            withField = stats.with_country_of_origin || 0;
+            break;
+        case "manufacturer_presence":
+            withField = stats.with_manufacturer || 0;
+            break;
+        case "inline_nutrition_completeness":
+            withField = stats.with_inline_nutrition || 0;
+            break;
+        case "dietary_tags_presence":
+            withField = stats.with_dietary_tags || 0;
             break;
         default:
             known = false;

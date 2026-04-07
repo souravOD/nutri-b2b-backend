@@ -1,8 +1,10 @@
 import { Router, type Request, type Response } from "express";
 import { requireAuth, requirePermissionMiddleware, requireRoleMiddleware, type AuthContext } from "../lib/auth.js";
 import { db } from "../lib/database.js";
+import { safeErrorDetail } from "../lib/safe-error.js";
 import { sql } from "drizzle-orm";
 import { Client, Databases, Query, Teams } from "node-appwrite";
+import { emitWebhookEvent } from "../lib/webhooks.js";
 
 const router = Router();
 
@@ -89,6 +91,7 @@ router.get(
                         ul.role,
                         ul.status,
                         ul.vendor_id,
+                        NULL AS membership_expires_at,
                         ul.created_at,
                         ul.updated_at
                     FROM gold.b2b_user_links ul
@@ -108,6 +111,7 @@ router.get(
                         ul.role,
                         ul.status,
                         ul.vendor_id,
+                        NULL AS membership_expires_at,
                         ul.created_at,
                         ul.updated_at
                     FROM gold.b2b_user_links ul
@@ -123,13 +127,14 @@ router.get(
                 displayName: r.display_name,
                 role: r.role,
                 status: r.status,
+                membershipExpiresAt: r.membership_expires_at ?? null,
                 linkedAt: r.created_at,
             }));
 
             return res.json({ data });
         } catch (err: any) {
             console.error("[GET /users]", err);
-            return problem(res, 500, err?.message || "Failed to list users");
+            return problem(res, 500, safeErrorDetail(err, "Failed to list users"));
         }
     }
 );
@@ -192,7 +197,7 @@ router.get(
             return res.json({ user: result.rows![0] });
         } catch (err: any) {
             console.error("[GET /users/:userId]", err);
-            return problem(res, 500, err?.message || "Failed to get user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to get user"));
         }
     }
 );
@@ -207,10 +212,10 @@ router.patch(
         try {
             const auth: AuthContext = (req as any).auth;
             const { userId } = req.params;
-            const { role } = req.body;
+            const { role, membershipExpiresAt } = req.body;
 
             // Validate role
-            const validRoles = ["vendor_admin", "vendor_operator", "vendor_viewer"];
+            const validRoles = ["vendor_admin", "vendor_operator", "vendor_viewer", "wellness_manager", "marketing_manager"];
             if (!role || !validRoles.includes(role)) {
                 return problem(res, 400, `Invalid role. Must be one of: ${validRoles.join(", ")}`);
             }
@@ -253,13 +258,27 @@ router.patch(
                 }
             }
 
-            // 1) Update Supabase b2b_user_links
+            // 1) Update Supabase b2b_user_links — role update always runs
             await db.execute(sql`
                 UPDATE gold.b2b_user_links
-                SET role = ${role}, updated_at = now()
+                SET role = ${role},
+                    updated_at = now()
                 WHERE user_id = ${userId}::uuid
                   AND vendor_id = ${vendorId}::uuid
             `);
+
+            // 1b) Best-effort: set membership_expires_at (silently skipped if column not yet migrated)
+            const expiresAt = membershipExpiresAt ? new Date(membershipExpiresAt) : null;
+            try {
+                await db.execute(sql`
+                    UPDATE gold.b2b_user_links
+                    SET membership_expires_at = ${expiresAt}
+                    WHERE user_id = ${userId}::uuid
+                      AND vendor_id = ${vendorId}::uuid
+                `);
+            } catch {
+                /* membership_expires_at column not yet migrated to DB — skip silently */
+            }
 
             // 2) Dual-write: Update Appwrite user_profiles document (non-fatal)
             const profilesCol = getUserProfilesCol();
@@ -308,10 +327,10 @@ router.patch(
                 }
             }
 
-            return res.json({ userId, role, updated: true });
+            return res.json({ userId, role, membershipExpiresAt: expiresAt, updated: true });
         } catch (err: any) {
             console.error("[PATCH /users/:userId/role]", err);
-            return problem(res, 500, err?.message || "Failed to update role");
+            return problem(res, 500, safeErrorDetail(err, "Failed to update role"));
         }
     }
 );
@@ -386,7 +405,7 @@ router.delete(
             return res.json({ userId, deactivated: true });
         } catch (err: any) {
             console.error("[DELETE /users/:userId]", err);
-            return problem(res, 500, err?.message || "Failed to deactivate user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to deactivate user"));
         }
     }
 );
@@ -447,7 +466,7 @@ router.post(
             return res.json({ userId, role: "superadmin", promoted: true });
         } catch (err: any) {
             console.error("[POST /users/:userId/promote-superadmin]", err);
-            return problem(res, 500, err?.message || "Failed to promote user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to promote user"));
         }
     }
 );
@@ -508,7 +527,188 @@ router.post(
             return res.json({ userId, role: "vendor_admin", demoted: true });
         } catch (err: any) {
             console.error("[POST /users/:userId/demote-superadmin]", err);
-            return problem(res, 500, err?.message || "Failed to demote user");
+            return problem(res, 500, safeErrorDetail(err, "Failed to demote user"));
+        }
+    }
+);
+
+// ── GET /users/:userId/export ────────────────────────────────────
+// GDPR data export: collects all user-linked rows and returns as JSON.
+// Requires manage:users permission.
+router.get(
+    "/:userId/export",
+    requireAuth as any,
+    requirePermissionMiddleware("manage:users") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth: AuthContext = (req as any).auth;
+            const { userId } = req.params;
+            const vendorId = auth.vendorId;
+
+            // Verify user belongs to this vendor
+            const userCheck = await db.execute(sql`
+                SELECT u.id, u.email, u.display_name, u.appwrite_user_id, u.created_at,
+                       ul.role, ul.status
+                FROM gold.b2b_users u
+                JOIN gold.b2b_user_links ul ON ul.user_id = u.id
+                WHERE u.id = ${userId}::uuid
+                  AND ul.vendor_id = ${vendorId}::uuid
+                LIMIT 1
+            `);
+            if (!userCheck.rows?.[0]) return problem(res, 404, "User not found in this vendor");
+
+            // Collect all user-linked rows in parallel
+            const [userLinks, auditEntries, systemSettingsUpdates] = await Promise.all([
+                db.execute(sql`
+                    SELECT ul.role, ul.status, ul.created_at, ul.updated_at,
+                           v.name AS vendor_name, v.slug AS vendor_slug
+                    FROM gold.b2b_user_links ul
+                    JOIN gold.vendors v ON v.id = ul.vendor_id
+                    WHERE ul.user_id = ${userId}::uuid
+                `).catch(() => ({ rows: [] as any[] })),
+
+                db.execute(sql`
+                    SELECT action, resource_type, resource_id, details, created_at
+                    FROM gold.audit_log
+                    WHERE user_id = ${userId}::uuid
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                `).catch(() => ({ rows: [] as any[] })),
+
+                db.execute(sql`
+                    SELECT key, updated_at
+                    FROM gold.system_settings
+                    WHERE updated_by = ${userId}::uuid
+                    ORDER BY updated_at DESC
+                `).catch(() => ({ rows: [] as any[] })),
+            ]);
+
+            const user = userCheck.rows[0] as any;
+            const exportPayload = {
+                exportedAt: new Date().toISOString(),
+                user: {
+                    id: user.id,
+                    email: user.email,
+                    displayName: user.display_name,
+                    createdAt: user.created_at,
+                },
+                vendorLinks: userLinks.rows,
+                auditLog: auditEntries.rows,
+                settingsUpdated: systemSettingsUpdates.rows,
+            };
+
+            res.setHeader("Content-Type", "application/json");
+            res.setHeader("Content-Disposition", `attachment; filename="user-export-${userId}.json"`);
+            return res.json(exportPayload);
+        } catch (err: any) {
+            console.error("[GET /users/:userId/export]", err);
+            return problem(res, 500, safeErrorDetail(err, "Failed to export user data"));
+        }
+    }
+);
+
+// ── DELETE /users/:userId/purge ──────────────────────────────────
+// GDPR right to erasure: anonymises PII and hard-deletes vendor link.
+// Requires superadmin role. Cannot purge yourself.
+router.delete(
+    "/:userId/purge",
+    requireAuth as any,
+    requireRoleMiddleware("superadmin") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth: AuthContext = (req as any).auth;
+            const { userId } = req.params;
+            const vendorId = auth.vendorId;
+
+            if (userId === auth.userId) return problem(res, 400, "Cannot purge your own account");
+
+            // Verify user exists in this vendor
+            const check = await db.execute(sql`
+                SELECT u.id, u.appwrite_user_id
+                FROM gold.b2b_users u
+                JOIN gold.b2b_user_links ul ON ul.user_id = u.id
+                WHERE u.id = ${userId}::uuid
+                  AND ul.vendor_id = ${vendorId}::uuid
+                LIMIT 1
+            `);
+            if (!check.rows?.[0]) return problem(res, 404, "User not found in this vendor");
+
+            const appwriteUserId = (check.rows[0] as any)?.appwrite_user_id;
+            const anonymisedEmail = `deleted-${userId}@deleted.invalid`;
+
+            await db.transaction(async (tx) => {
+                // Anonymise PII in b2b_users
+                await tx.execute(sql`
+                    UPDATE gold.b2b_users
+                    SET email        = ${anonymisedEmail},
+                        display_name = '[deleted]',
+                        updated_at   = now()
+                    WHERE id = ${userId}::uuid
+                `);
+                // Hard-delete vendor link
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_user_links
+                    WHERE user_id = ${userId}::uuid
+                      AND vendor_id = ${vendorId}::uuid
+                `);
+                // Delete health profiles
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_customer_health_profiles
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => {});
+                // Delete customer tags
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_customer_tags
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => {});
+                // Delete product matches
+                await tx.execute(sql`
+                    DELETE FROM gold.b2b_product_matches
+                    WHERE customer_id = ${userId}::uuid
+                `).catch(() => {});
+                // Nullify user references in audit_log (keep entries, remove identity)
+                await tx.execute(sql`
+                    UPDATE gold.audit_log
+                    SET user_id = NULL
+                    WHERE user_id = ${userId}::uuid
+                `).catch(() => { /* column may not be nullable in all deployments */ });
+                // Log the deletion
+                await tx.execute(sql`
+                    INSERT INTO gold.gdpr_deletion_log (user_id, vendor_id, anonymised_email, deleted_at)
+                    VALUES (${userId}::uuid, ${vendorId}::uuid, ${anonymisedEmail}, now())
+                    ON CONFLICT DO NOTHING
+                `).catch(() => { /* table may not exist in all deployments */ });
+            });
+
+            // Best-effort: remove from Appwrite team
+            if (appwriteUserId) {
+                try {
+                    const teamRow = await db.execute(sql`
+                        SELECT team_id FROM gold.vendors WHERE id = ${vendorId}::uuid LIMIT 1
+                    `);
+                    const teamId = (teamRow.rows?.[0] as any)?.team_id;
+                    if (teamId) {
+                        const teams = adminTeams();
+                        const memberships = await teams.listMemberships(teamId, [Query.equal("userId", appwriteUserId)]);
+                        if (memberships.memberships.length > 0) {
+                            await teams.deleteMembership(teamId, memberships.memberships[0].$id);
+                        }
+                    }
+                } catch (awErr: any) {
+                    console.warn("[DELETE /users/:userId/purge] Appwrite cleanup skipped:", awErr?.message);
+                }
+            }
+
+            // Emit member.deprovisioned webhook
+            emitWebhookEvent(vendorId, "member.deprovisioned", {
+                userId,
+                anonymisedEmail,
+            }).catch(() => {});
+
+            return res.json({ userId, purged: true, anonymisedEmail });
+        } catch (err: any) {
+            console.error("[DELETE /users/:userId/purge]", err);
+            return problem(res, 500, safeErrorDetail(err, "Failed to purge user data"));
         }
     }
 );

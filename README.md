@@ -49,6 +49,7 @@ Production-ready backend for the Nutri B2B platform. This repository exposes RES
 | `CORS_ORIGINS` |  | Comma‑separated allowed origins. If omitted, localhost is allowed in dev; set in prod. |
 | `CORS_ALLOW_ALL` |  | Set to `1` to allow any origin (not recommended for prod). |
 | `QUEUE_TICK_SECRET` |  | Optional token to protect the cron endpoint `/api/queue-tick`. |
+| `ORCHESTRATOR_URL` | `http://localhost:8100` | Base URL of the ingestion orchestrator (see [docs/INGESTION_ORCHESTRATOR.md](docs/INGESTION_ORCHESTRATOR.md)). |
 
 > **Tip:** Never commit `.env` — only `.env.example` is tracked.
 

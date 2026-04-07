@@ -121,6 +121,36 @@ router.get(
     },
 );
 
+// ── POST /alerts/mark-all-read ──────────────────────────────────────────────
+// Mark all unread alerts for the vendor as read.
+router.post(
+    "/mark-all-read",
+    requireAuth as any,
+    requirePermissionMiddleware("write:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                UPDATE gold.b2b_alerts
+                SET status = 'read', read_at = now()
+                WHERE vendor_id = ${vendorId}::uuid AND status = 'unread'
+                RETURNING id
+            `);
+            const updated = result.rows?.length ?? 0;
+
+            return res.json({ ok: true, updated });
+        } catch (err: any) {
+            console.error("[alerts] POST /mark-all-read error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to mark alerts as read" });
+        }
+    },
+);
+
 // ── PATCH /alerts/:id ───────────────────────────────────────────────────────
 // Update alert status (read/dismissed). Sets read_at timestamp.
 router.patch(
@@ -166,6 +196,88 @@ router.patch(
         } catch (err: any) {
             console.error("[alerts] PATCH /:id error:", err?.message || err);
             return res.status(500).json({ code: "internal_error", detail: "Failed to update alert" });
+        }
+    },
+);
+
+// ── GET /alerts/banners ─────────────────────────────────────────────────────
+// Returns active system-type alerts that should be shown as dismissable
+// top-of-page banners. Returns up to 3 unread/read system alerts, newest first.
+router.get(
+    "/banners",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, title, description, priority, status, created_at
+                FROM gold.b2b_alerts
+                WHERE vendor_id = ${vendorId}::uuid
+                  AND type = 'system'
+                  AND status != 'dismissed'
+                  AND (display_until IS NULL OR display_until > now())
+                ORDER BY created_at DESC
+                LIMIT 3
+            `);
+
+            return res.json({ banners: result.rows || [] });
+        } catch (err: any) {
+            console.error("[alerts] GET /banners error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to fetch banners" });
+        }
+    },
+);
+
+// ── POST /alerts ────────────────────────────────────────────────────────────
+// Create a new announcement (system alert) visible as a top-of-page banner.
+router.post(
+    "/",
+    requireAuth as any,
+    requirePermissionMiddleware("manage:settings") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const vendorId = auth.vendorId;
+            if (!vendorId) {
+                return res.status(400).json({ code: "bad_request", detail: "Missing vendor context" });
+            }
+
+            const { title, description, priority = "medium", expiresIn } = req.body || {};
+            if (!title?.trim()) {
+                return res.status(400).json({ code: "bad_request", detail: "title is required" });
+            }
+            if (!VALID_PRIORITIES.includes(priority)) {
+                return res.status(400).json({ code: "bad_request", detail: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
+            }
+
+            let displayUntil: string | null = null;
+            if (expiresIn === "1d") displayUntil = new Date(Date.now() + 86_400_000).toISOString();
+            else if (expiresIn === "3d") displayUntil = new Date(Date.now() + 3 * 86_400_000).toISOString();
+            else if (expiresIn === "7d") displayUntil = new Date(Date.now() + 7 * 86_400_000).toISOString();
+
+            const result = await db.execute(sql`
+                INSERT INTO gold.b2b_alerts (vendor_id, type, priority, title, description, display_until)
+                VALUES (
+                    ${vendorId}::uuid,
+                    'system',
+                    ${priority},
+                    ${String(title).slice(0, 255)},
+                    ${description?.trim() || null},
+                    ${displayUntil ? sql`${displayUntil}::timestamptz` : sql`NULL`}
+                )
+                RETURNING id, title, description, priority, status, created_at
+            `);
+
+            return res.status(201).json({ ok: true, alert: result.rows?.[0] });
+        } catch (err: any) {
+            console.error("[alerts] POST / error:", err?.message || err);
+            return res.status(500).json({ code: "internal_error", detail: "Failed to create announcement" });
         }
     },
 );

@@ -5,8 +5,9 @@
 import { Router, type Request, type Response } from "express";
 import { requireAuth, requirePermissionMiddleware } from "../lib/auth.js";
 import { db } from "../lib/database.js";
-import { sql } from "drizzle-orm";
+import { sql, eq, and, count } from "drizzle-orm";
 import { Client, Databases, Query } from "node-appwrite";
+import { webhookEndpoints } from "../../shared/schema.js";
 
 const router = Router();
 
@@ -88,7 +89,7 @@ router.get(
 
             // Fetch vendor record
             const vendorResult = await db.execute(sql`
-                SELECT id, name, slug, status, catalog_version, api_endpoint,
+                SELECT id, name, slug, status, vendor_type, country, industry, catalog_version, api_endpoint,
                        contact_email, team_id, domains, owner_user_id, billing_email,
                        created_at, updated_at
                 FROM gold.vendors WHERE id = ${vendorId} LIMIT 1
@@ -125,6 +126,9 @@ router.get(
                     name: vendor.name,
                     slug: vendor.slug,
                     status: vendor.status,
+                    vendorType: vendor.vendor_type ?? null,
+                    country: vendor.country ?? null,
+                    industry: vendor.industry ?? null,
                     catalogVersion: vendor.catalog_version,
                     apiEndpoint: vendor.api_endpoint,
                     contactEmail: vendor.contact_email,
@@ -166,7 +170,7 @@ router.patch(
                 return res.status(403).json({ error: "Cannot update a different vendor" });
             }
 
-            const { name, contactEmail, billingEmail, apiEndpoint, domains } = req.body;
+            const { name, contactEmail, billingEmail, apiEndpoint, domains, vendorType, country, industry } = req.body;
 
             // Build SET clauses dynamically
             const setParts: any[] = [];
@@ -174,6 +178,9 @@ router.patch(
             if (contactEmail !== undefined) setParts.push(sql`contact_email = ${contactEmail}`);
             if (billingEmail !== undefined) setParts.push(sql`billing_email = ${billingEmail}`);
             if (apiEndpoint !== undefined) setParts.push(sql`api_endpoint = ${apiEndpoint}`);
+            if (vendorType !== undefined) setParts.push(sql`vendor_type = ${vendorType}`);
+            if (country !== undefined) setParts.push(sql`country = ${country}`);
+            if (industry !== undefined) setParts.push(sql`industry = ${industry}`);
             if (domains !== undefined && Array.isArray(domains)) {
                 setParts.push(sql`domains = ${sql`ARRAY[${sql.join(domains.map((d: string) => sql`${d}`), sql`, `)}]::text[]`}`);
             }
@@ -187,7 +194,7 @@ router.patch(
                 UPDATE gold.vendors
                 SET ${sql.join(setParts, sql`, `)}
                 WHERE id = ${vendorId}
-                RETURNING id, name, slug, status, contact_email, billing_email,
+                RETURNING id, name, slug, status, vendor_type, country, industry, contact_email, billing_email,
                           api_endpoint, domains, team_id, updated_at
             `);
 
@@ -227,6 +234,9 @@ router.patch(
                     name: updated.name,
                     slug: updated.slug,
                     status: updated.status,
+                    vendorType: updated.vendor_type ?? null,
+                    country: updated.country ?? null,
+                    industry: updated.industry ?? null,
                     contactEmail: updated.contact_email,
                     billingEmail: updated.billing_email,
                     apiEndpoint: updated.api_endpoint,
@@ -313,6 +323,133 @@ router.post(
             });
         } catch (err: any) {
             console.error("[vendors] POST /:vendorId/suspend error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
+// ── GET /vendors/:vendorId/alerts ──────────────────────────────────────────
+// Phase 2: Last N alerts for this vendor (superadmin or own vendor)
+router.get(
+    "/:vendorId/alerts",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+            const limit = Math.min(parseInt(String(req.query.limit || "5"), 10) || 5, 20);
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view alerts for a different vendor" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, type, priority, title, description, status, created_at
+                FROM gold.b2b_alerts
+                WHERE vendor_id = ${vendorId}::uuid
+                ORDER BY created_at DESC
+                LIMIT ${limit}
+            `);
+
+            return res.json({
+                alerts: (result.rows ?? []).map((r: any) => ({
+                    id: r.id,
+                    type: r.type,
+                    priority: r.priority,
+                    title: r.title,
+                    description: r.description,
+                    status: r.status,
+                    createdAt: r.created_at,
+                })),
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/alerts error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
+// ── GET /vendors/:vendorId/runs ─────────────────────────────────────────────
+// Phase 2: Last N ingestion runs for this vendor (superadmin or own vendor)
+router.get(
+    "/:vendorId/runs",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+            const limit = Math.min(parseInt(String(req.query.limit || "5"), 10) || 5, 20);
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view runs for a different vendor" });
+            }
+
+            const result = await db.execute(sql`
+                SELECT id, flow_name, status, started_at, completed_at, total_records_processed, total_records_written
+                FROM orchestration.orchestration_runs
+                WHERE vendor_id = ${vendorId}::uuid
+                ORDER BY started_at DESC NULLS LAST
+                LIMIT ${limit}
+            `);
+
+            return res.json({
+                runs: (result.rows ?? []).map((r: any) => ({
+                    id: r.id,
+                    flowName: r.flow_name,
+                    status: r.status,
+                    startedAt: r.started_at,
+                    completedAt: r.completed_at,
+                    totalRecordsProcessed: r.total_records_processed ?? 0,
+                    totalRecordsWritten: r.total_records_written ?? 0,
+                })),
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/runs error:", err?.message || err);
+            return res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
+// ── GET /vendors/:vendorId/config ────────────────────────────────────────────
+// Phase 2: Config summary (API keys, webhooks, IP allowlist counts)
+router.get(
+    "/:vendorId/config",
+    requireAuth as any,
+    requirePermissionMiddleware("read:vendors") as any,
+    async (req: Request, res: Response) => {
+        try {
+            const auth = (req as any).auth;
+            const { vendorId } = req.params;
+
+            if (auth.role !== "superadmin" && auth.vendorId !== vendorId) {
+                return res.status(403).json({ error: "Cannot view config for a different vendor" });
+            }
+
+            const [apiKeysResult, webhooksResult, ipAllowlistResult] = await Promise.all([
+                db.execute(sql`
+                    SELECT COUNT(*)::int AS count FROM gold.api_keys
+                    WHERE vendor_id = ${vendorId}::uuid AND revoked_at IS NULL AND is_active = true
+                `),
+                db.select({ count: count() })
+                    .from(webhookEndpoints)
+                    .where(and(eq(webhookEndpoints.vendorId, vendorId), eq(webhookEndpoints.enabled, true))),
+                db.execute(sql`
+                    SELECT COUNT(*)::int AS count FROM gold.b2b_ip_allowlist
+                    WHERE vendor_id = ${vendorId}::uuid AND is_active = true
+                `),
+            ]);
+
+            return res.json({
+                config: {
+                    apiKeyCount: (apiKeysResult.rows?.[0] as any)?.count ?? 0,
+                    webhookCount: (webhooksResult[0] as any)?.count ?? 0,
+                    ipAllowlistCount: (ipAllowlistResult.rows?.[0] as any)?.count ?? 0,
+                },
+            });
+        } catch (err: any) {
+            console.error("[vendors] GET /:vendorId/config error:", err?.message || err);
             return res.status(500).json({ error: "Internal server error" });
         }
     }

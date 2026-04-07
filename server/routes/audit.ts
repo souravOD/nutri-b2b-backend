@@ -37,8 +37,8 @@ router.get(
             const action = req.query.action as string | undefined;
             const from = req.query.from as string | undefined;
             const to = req.query.to as string | undefined;
-            const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 100);
-            const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+            const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 50, 1), 100);
+            const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
 
             // Build dynamic WHERE conditions
             const conditions: any[] = [];

@@ -27,4 +27,3 @@ aw.jar
 # Tests and local tooling
 jest.config.ts
 jest.setup.ts
-scripts

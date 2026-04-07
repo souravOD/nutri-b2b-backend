@@ -25,7 +25,7 @@ export interface AuthContext {
   appwriteUserId: string;
   email: string;
   vendorId: string;
-  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer" | "wellness_manager" | "marketing_manager";
   permissions: string[];
 }
 
@@ -73,6 +73,12 @@ export function computePermissions(role: AuthContext["role"]): string[] {
       "write:ingest",
       "read:matches",
     ];
+  }
+  if (role === "wellness_manager") {
+    return ["read:customers", "read:products", "read:matches", "read:audit"];
+  }
+  if (role === "marketing_manager") {
+    return ["read:customers", "read:products", "read:vendors", "write:vendors", "read:audit"];
   }
   // vendor_viewer (default)
   return ["read:products", "read:customers", "read:matches"];

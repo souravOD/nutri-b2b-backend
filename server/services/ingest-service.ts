@@ -261,6 +261,7 @@ async function insertBronzeBatch(
 // ────────────────────────────────────────────────────────────────
 
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || "http://localhost:8100";
+const ORCHESTRATOR_SECRET = process.env.ORCHESTRATOR_SECRET;
 
 export interface OrchestratorTriggerResponse {
     run_id: string;
@@ -284,7 +285,10 @@ export async function triggerOrchestrator(params: {
 }): Promise<OrchestratorTriggerResponse> {
     const res = await fetch(`${ORCHESTRATOR_URL}/api/trigger`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            ...(ORCHESTRATOR_SECRET ? { "Authorization": `Bearer ${ORCHESTRATOR_SECRET}` } : {}),
+        },
         body: JSON.stringify(params),
     });
 
@@ -301,12 +305,42 @@ export async function triggerOrchestrator(params: {
  * Returns null if the run is not found (404).
  */
 export async function getOrchestrationRunStatus(runId: string): Promise<any | null> {
-    const res = await fetch(`${ORCHESTRATOR_URL}/api/runs/${runId}`);
+    const res = await fetch(`${ORCHESTRATOR_URL}/api/runs/${runId}`, {
+        headers: {
+            ...(ORCHESTRATOR_SECRET ? { "Authorization": `Bearer ${ORCHESTRATOR_SECRET}` } : {}),
+        },
+    });
     if (!res.ok) {
         if (res.status === 404) return null;
         throw new Error(`Orchestrator status check failed (${res.status})`);
     }
     return res.json();
+}
+
+/**
+ * Check if the ingestion orchestrator is reachable.
+ * Uses a lightweight probe (GET non-existent run) — 404 or 2xx means service is up.
+ */
+export async function checkOrchestratorHealth(): Promise<{
+    reachable: boolean;
+    url: string;
+    error?: string;
+}> {
+    const url = ORCHESTRATOR_URL;
+    try {
+        const res = await fetch(`${url}/api/runs/00000000-0000-0000-0000-000000000000`, {
+            signal: AbortSignal.timeout(5000),
+        });
+        // 404 = run not found but service responded; 2xx = success
+        const reachable = res.status === 404 || (res.status >= 200 && res.status < 300);
+        return { reachable, url, ...(reachable ? {} : { error: `Unexpected status ${res.status}` }) };
+    } catch (err: any) {
+        return {
+            reachable: false,
+            url,
+            error: err?.message || err?.code || String(err),
+        };
+    }
 }
 
 // ────────────────────────────────────────────────────────────────

@@ -34,3 +34,13 @@ export function rateLimitMiddleware(req: Request, res: Response, next: NextFunct
     detail: `Rate limit exceeded (${limit}/min). Try again in ${retry}s.`
   });
 }
+
+// Sweep expired buckets every 5 minutes to prevent unbounded Map growth.
+// Entries are only removed once their reset window has already passed,
+// so active rate limits are never affected.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of buckets) {
+    if (bucket.reset < now) buckets.delete(key);
+  }
+}, 5 * 60_000).unref();

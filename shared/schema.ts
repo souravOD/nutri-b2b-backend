@@ -65,6 +65,7 @@ export const userLinks = gold.table("b2b_user_links", {
   vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
   role: text("role").notNull(),
   status: text("status").notNull().default("active"),
+  membershipExpiresAt: timestamp("membership_expires_at"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 }, (table) => ({
@@ -102,9 +103,53 @@ export const products = gold.table("products", {
   gtinType: text("gtin_type"),
   servingSize: text("serving_size"),
   packageWeight: text("package_weight"),
+  packageWeightG: numeric("package_weight_g", { precision: 10, scale: 2 }),
+  servingSizeG: numeric("serving_size_g", { precision: 10, scale: 2 }),
+  servingsPerContainer: numeric("servings_per_container", { precision: 5, scale: 2 }),
   subCategoryId: uuid("sub_category_id"),
   cuisineId: uuid("cuisine_id"),
   marketId: uuid("market_id"),
+
+  // Gold 3: image, manufacturer, traceability
+  imageUrl: text("image_url"),
+  manufacturer: text("manufacturer"),
+  countryOfOrigin: text("country_of_origin"),
+  globalProductId: uuid("global_product_id"),
+  vendorSpecificAttrs: jsonb("vendor_specific_attrs"),
+  sourceSystem: text("source_system"),
+  mpn: text("mpn"),
+  pluCode: text("plu_code"),
+
+  // Gold 3: inline nutrition
+  calories: numeric("calories", { precision: 7, scale: 2 }),
+  totalFatG: numeric("total_fat_g", { precision: 6, scale: 2 }),
+  saturatedFatG: numeric("saturated_fat_g", { precision: 6, scale: 2 }),
+  sodiumMg: numeric("sodium_mg", { precision: 7, scale: 2 }),
+  totalCarbsG: numeric("total_carbs_g", { precision: 6, scale: 2 }),
+  totalSugarsG: numeric("total_sugars_g", { precision: 6, scale: 2 }),
+  addedSugarsG: numeric("added_sugars_g", { precision: 6, scale: 2 }),
+  proteinG: numeric("protein_g", { precision: 6, scale: 2 }),
+  dietaryFiberG: numeric("dietary_fiber_g", { precision: 6, scale: 2 }),
+  potassiumMg: numeric("potassium_mg", { precision: 6, scale: 2 }),
+  phosphorusMg: numeric("phosphorus_mg", { precision: 6, scale: 2 }),
+
+  // Extended nutrition (DB-002)
+  transFatG: numeric("trans_fat_g", { precision: 6, scale: 2 }),
+  cholesterolMg: numeric("cholesterol_mg", { precision: 7, scale: 2 }),
+  vitaminAMcg: numeric("vitamin_a_mcg", { precision: 7, scale: 2 }),
+  vitaminCMg: numeric("vitamin_c_mg", { precision: 7, scale: 2 }),
+  vitaminDMcg: numeric("vitamin_d_mcg", { precision: 7, scale: 2 }),
+  vitaminEMg: numeric("vitamin_e_mg", { precision: 7, scale: 2 }),
+  vitaminKMcg: numeric("vitamin_k_mcg", { precision: 7, scale: 2 }),
+  thiamineMg: numeric("thiamine_mg", { precision: 7, scale: 2 }),
+  riboflavinMg: numeric("riboflavin_mg", { precision: 7, scale: 2 }),
+  niacinMg: numeric("niacin_mg", { precision: 7, scale: 2 }),
+  vitaminB6Mg: numeric("vitamin_b6_mg", { precision: 7, scale: 2 }),
+  folateMcg: numeric("folate_mcg", { precision: 7, scale: 2 }),
+  vitaminB12Mcg: numeric("vitamin_b12_mcg", { precision: 7, scale: 2 }),
+  calciumMg: numeric("calcium_mg", { precision: 7, scale: 2 }),
+  ironMg: numeric("iron_mg", { precision: 7, scale: 2 }),
+  zincMg: numeric("zinc_mg", { precision: 7, scale: 2 }),
 
   // Compatibility-layer fields
   nutrition: jsonb("nutrition"),
@@ -145,14 +190,14 @@ export const customers = gold.table("b2b_customers", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 
-  // Compatibility-layer fields
-  location: jsonb("location"),
+  // Segmentation & tier
+  customerSegment: text("customer_segment"),
+  customerTier: text("customer_tier"),
+
+  // Compatibility-layer fields (gold 2 schema: custom_tags, product_notes only)
   customTags: text("custom_tags").array(),
   notes: text("notes"),
   productNotes: jsonb("product_notes").default(sql`'{}'::jsonb`),
-  searchTsv: text("search_tsv"),
-  createdBy: uuid("created_by"),
-  updatedBy: uuid("updated_by"),
 }, (table) => ({
   uniqueVendorExternal: uniqueIndex("idx_b2b_customers_vendor_external").on(table.vendorId, table.externalId),
 }));
@@ -178,21 +223,49 @@ export const customerHealthProfiles = gold.table("b2b_customer_health_profiles",
   targetSodiumMg: integer("target_sodium_mg"),
   targetSugarG: numeric("target_sugar_g", { precision: 5, scale: 2 }),
 
-  // Compatibility-layer fields
-  age: integer("age"),
-  gender: text("gender"),
-  conditions: text("conditions").array().default(sql`'{}'::text[]`),
-  dietGoals: text("diet_goals").array().default(sql`'{}'::text[]`),
-  macroTargets: jsonb("macro_targets").default(sql`'{}'::jsonb`),
-  avoidAllergens: text("avoid_allergens").array().default(sql`'{}'::text[]`),
-  tdeeCached: numeric("tdee_cached", { precision: 8, scale: 2 }),
-  derivedLimits: jsonb("derived_limits").default(sql`'{}'::jsonb`),
-
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
-  updatedBy: uuid("updated_by"),
 }, (table) => ({
   uniqueCustomer: uniqueIndex("b2b_customer_health_profiles_b2b_customer_id_key").on(table.customerId),
+}));
+
+// Junction tables for conditions, allergens, diet goals (gold 2 schema)
+export const customerHealthConditions = gold.table("b2b_customer_health_conditions", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  conditionId: uuid("condition_id").notNull().references(() => healthConditions.id),
+  severity: varchar("severity", { length: 20 }),
+  diagnosisDate: date("diagnosis_date"),
+  notes: text("notes"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerCondition: uniqueIndex("idx_b2b_cust_conditions_unique").on(table.customerId, table.conditionId),
+}));
+
+export const customerAllergens = gold.table("b2b_customer_allergens", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  allergenId: uuid("allergen_id").notNull().references(() => taxAllergens.id),
+  severity: varchar("severity", { length: 20 }),
+  reactionDescription: text("reaction_description"),
+  diagnosisDate: date("diagnosis_date"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerAllergen: uniqueIndex("idx_b2b_cust_allergens_unique").on(table.customerId, table.allergenId),
+}));
+
+export const customerDietaryPreferences = gold.table("b2b_customer_dietary_preferences", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  customerId: uuid("b2b_customer_id").notNull().references(() => customers.id),
+  dietId: uuid("diet_id").notNull().references(() => taxTags.id),
+  strictness: varchar("strictness", { length: 20 }).default("moderate"),
+  startDate: date("start_date"),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueCustomerDiet: uniqueIndex("idx_b2b_cust_diets_unique").on(table.customerId, table.dietId),
 }));
 
 export const vendorMappings = gold.table("b2b_vendor_mappings", {
@@ -543,6 +616,7 @@ export const webhookEndpoints = pgTable("webhook_endpoints", {
   secretRef: text("secret_ref"),
   enabled: boolean("enabled").notNull().default(true),
   description: text("description"),
+  events: text("events").array().notNull().default(sql`ARRAY['product.match.found','import.completed']::text[]`),
   retriesMax: integer("retries_max").notNull().default(3),
   toleranceSec: integer("tolerance_sec").notNull().default(300),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
@@ -560,6 +634,92 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   signature: text("signature"),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 });
+
+// TODO: Uncomment when db:push is run to create this table
+// export const userSearches = pgTable("user_searches", {
+//   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+//   userId: uuid("user_id").notNull(),
+//   vendorId: uuid("vendor_id"),
+//   query: text("query").notNull(),
+//   searchedAt: timestamp("searched_at").notNull().default(sql`now()`),
+// }, (t) => ({
+//   userIdx: index("idx_user_searches_user").on(t.userId),
+//   searchedAtIdx: index("idx_user_searches_at").on(t.searchedAt),
+// }));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance / Security tables (DB-007 — previously raw SQL only)
+// ─────────────────────────────────────────────────────────────────────────────
+export const complianceRules = gold.table("b2b_compliance_rules", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  ruleCode: text("rule_code").notNull(),
+  ruleType: text("rule_type").notNull(),
+  description: text("description"),
+  severity: text("severity").notNull().default("medium"),
+  isActive: boolean("is_active").notNull().default(true),
+  config: jsonb("config").default(sql`'{}'::jsonb`),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_compliance_rules_vendor").on(table.vendorId),
+}));
+
+export const b2bAlerts = gold.table("b2b_alerts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  type: text("type").notNull().default("system"),
+  title: text("title").notNull(),
+  description: text("description"),
+  priority: text("priority").notNull().default("medium"),
+  status: text("status").notNull().default("active"),
+  relatedEntityType: text("related_entity_type"),
+  relatedEntityId: uuid("related_entity_id"),
+  displayUntil: timestamp("display_until"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_alerts_vendor").on(table.vendorId),
+  statusIdx: index("idx_b2b_alerts_status").on(table.status),
+}));
+
+export const b2bNpsResponses = gold.table("b2b_nps_responses", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  score: integer("score").notNull(),
+  comment: text("comment"),
+  respondentKey: text("respondent_key"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_nps_vendor_created").on(table.vendorId, table.createdAt),
+}));
+
+export const b2bCampaigns = gold.table("b2b_campaigns", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  name: text("name").notNull(),
+  targetSegment: text("target_segment").notNull().default("all"),
+  subject: text("subject").notNull(),
+  message: text("message").notNull(),
+  status: text("status").notNull().default("draft"),
+  sentAt: timestamp("sent_at"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_campaigns_vendor").on(table.vendorId, table.createdAt),
+}));
+
+export const ipAllowlist = gold.table("b2b_ip_allowlist", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  cidr: text("cidr").notNull(),
+  label: text("label"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  vendorIdx: index("idx_b2b_ip_allowlist_vendor").on(table.vendorId),
+}));
 
 export const idempotencyKeys = pgTable("idempotency_keys", {
   key: text("key").primaryKey(),
@@ -581,7 +741,7 @@ export const insertVendorSchema = createInsertSchema(vendors).omit({ id: true, c
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertUserLinkSchema = createInsertSchema(userLinks).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertProductSchema = createInsertSchema(products).omit({ id: true, createdAt: true, updatedAt: true, searchTsv: true });
-export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true, updatedAt: true, searchTsv: true });
+export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCustomerHealthProfileSchema = createInsertSchema(customerHealthProfiles).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertIngestionJobSchema = createInsertSchema(ingestionJobs).omit({ id: true, createdAt: true });
 export const insertWebhookEndpointSchema = createInsertSchema(webhookEndpoints).omit({ id: true, createdAt: true, updatedAt: true });
@@ -620,7 +780,7 @@ export interface AuthContext {
   userId: string;
   email: string;
   vendorId: string;
-  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer";
+  role: "superadmin" | "vendor_admin" | "vendor_operator" | "vendor_viewer" | "wellness_manager" | "marketing_manager";
   permissions: string[];
 }
 

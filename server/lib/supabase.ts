@@ -96,5 +96,9 @@ export async function getSecret(secretRef: string): Promise<string> {
     throw new Error(`Failed to retrieve secret: ${error.message}`);
   }
 
+  if (!data?.decrypted_secret) {
+    throw new Error(`Secret not found or is empty for ref: ${secretRef}`);
+  }
+
   return data.decrypted_secret;
 }
