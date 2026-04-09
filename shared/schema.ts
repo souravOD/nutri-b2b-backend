@@ -703,6 +703,10 @@ export const b2bCampaigns = gold.table("b2b_campaigns", {
   message: text("message").notNull(),
   status: text("status").notNull().default("draft"),
   sentAt: timestamp("sent_at"),
+  recipientCount: integer("recipient_count"),
+  abTestEnabled: boolean("ab_test_enabled").notNull().default(false),
+  subjectB: text("subject_b"),
+  messageB: text("message_b"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 }, (table) => ({

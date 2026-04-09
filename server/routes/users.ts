@@ -534,15 +534,22 @@ router.post(
 
 // ── GET /users/:userId/export ────────────────────────────────────
 // GDPR data export: collects all user-linked rows and returns as JSON.
-// Requires manage:users permission.
+// Allowed: export own data (data subject), or any vendor user with manage:users.
 router.get(
     "/:userId/export",
     requireAuth as any,
-    requirePermissionMiddleware("manage:users") as any,
     async (req: Request, res: Response) => {
         try {
             const auth: AuthContext = (req as any).auth;
             const { userId } = req.params;
+            const isSelf = auth.userId === userId;
+            const canManageUsers =
+                auth.permissions.includes("*") ||
+                auth.permissions.includes("manage:users");
+            if (!isSelf && !canManageUsers) {
+                return problem(res, 403, "You do not have permission to export this user's data");
+            }
+
             const vendorId = auth.vendorId;
 
             // Verify user belongs to this vendor

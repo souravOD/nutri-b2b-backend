@@ -92,7 +92,7 @@ router.get(
     try {
       const result = await db.execute(sql`
         SELECT id, name, target_segment, subject, message, status, sent_at,
-               recipient_count, created_at, updated_at
+               recipient_count, ab_test_enabled, subject_b, message_b, created_at, updated_at
         FROM gold.b2b_campaigns
         WHERE vendor_id = ${vendorId}::uuid
         ORDER BY created_at DESC
@@ -114,20 +114,23 @@ router.post(
     const vendorId = (req as any).auth?.vendorId;
     if (!vendorId) return res.status(403).json({ code: "forbidden", detail: "No vendor context" });
 
-    const { name, target_segment = "all", subject, message } = req.body || {};
+    const { name, target_segment = "all", subject, message, ab_test_enabled, subject_b, message_b } = req.body || {};
     if (!name?.trim()) return res.status(400).json({ code: "bad_request", detail: "name is required" });
     if (!subject?.trim()) return res.status(400).json({ code: "bad_request", detail: "subject is required" });
     if (!message?.trim()) return res.status(400).json({ code: "bad_request", detail: "message is required" });
     if (!VALID_SEGMENTS.includes(target_segment)) {
       return res.status(400).json({ code: "bad_request", detail: `target_segment must be one of: ${VALID_SEGMENTS.join(", ")}` });
     }
+    const abEnabled = Boolean(ab_test_enabled);
+    const subjectB = abEnabled ? (subject_b?.trim() ?? null) : null;
+    const messageB = abEnabled ? (message_b?.trim() ?? null) : null;
 
     try {
       const result = await db.execute(sql`
-        INSERT INTO gold.b2b_campaigns (vendor_id, name, target_segment, subject, message)
-        VALUES (${vendorId}::uuid, ${name.trim()}, ${target_segment}, ${subject.trim()}, ${message.trim()})
+        INSERT INTO gold.b2b_campaigns (vendor_id, name, target_segment, subject, message, ab_test_enabled, subject_b, message_b)
+        VALUES (${vendorId}::uuid, ${name.trim()}, ${target_segment}, ${subject.trim()}, ${message.trim()}, ${abEnabled}, ${subjectB}, ${messageB})
         RETURNING id, name, target_segment, subject, message, status, sent_at,
-                  recipient_count, created_at, updated_at
+                  recipient_count, ab_test_enabled, subject_b, message_b, created_at, updated_at
       `);
       return res.status(201).json({ campaign: result.rows?.[0] });
     } catch (err: any) {

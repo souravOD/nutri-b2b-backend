@@ -4,7 +4,7 @@
  * Unit tests for the users router (routes/users.ts)
  *
  * Covers: GET /users, GET /users/:userId, PATCH /users/:userId/role,
- *         DELETE /users/:userId, permission enforcement
+ *         DELETE /users/:userId, GET /users/:userId/export, permission enforcement
  */
 
 // ── Mocks ─────────────────────────────────────────────────────────
@@ -282,6 +282,65 @@ describe("Users Router", () => {
             const app = createApp(viewerAuth);
             const res = await request(app).delete("/users/u1");
             expect(res.status).toBe(403);
+        });
+    });
+
+    // ── GET /users/:userId/export ────────────────────────────────
+
+    describe("GET /users/:userId/export", () => {
+        const exportUserRow = {
+            id: "user-viewer-id",
+            email: "viewer@acme.com",
+            display_name: "Viewer User",
+            appwrite_user_id: "aw-v1",
+            created_at: new Date("2024-01-01"),
+            role: "vendor_viewer",
+            status: "active",
+        };
+
+        it("allows vendor_viewer to export their own data", async () => {
+            mockExecute
+                .mockResolvedValueOnce({ rows: [exportUserRow] })
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [] });
+
+            const app = createApp(viewerAuth);
+            const res = await request(app).get("/users/user-viewer-id/export");
+
+            expect(res.status).toBe(200);
+            expect(res.body.user.email).toBe("viewer@acme.com");
+            expect(res.body.vendorLinks).toEqual([]);
+        });
+
+        it("returns 403 when vendor_viewer tries to export another user", async () => {
+            const app = createApp(viewerAuth);
+            const res = await request(app).get("/users/u1/export");
+            expect(res.status).toBe(403);
+            expect(mockExecute).not.toHaveBeenCalled();
+        });
+
+        it("allows admin to export another user in the vendor", async () => {
+            const otherRow = {
+                id: "u1",
+                email: "a@v.com",
+                display_name: "Alice",
+                appwrite_user_id: "aw-u1",
+                created_at: new Date("2024-01-01"),
+                role: "vendor_admin",
+                status: "active",
+            };
+            mockExecute
+                .mockResolvedValueOnce({ rows: [otherRow] })
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [] })
+                .mockResolvedValueOnce({ rows: [] });
+
+            const app = createApp(adminAuth);
+            const res = await request(app).get("/users/u1/export");
+
+            expect(res.status).toBe(200);
+            expect(res.body.user.email).toBe("a@v.com");
         });
     });
 });

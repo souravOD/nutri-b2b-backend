@@ -1354,6 +1354,73 @@ export function registerRoutes(app: Express) {
     }
   }));
 
+  // ── Scheduled Reports ──────────────────────────────────────────────────────
+  // Compute the next delivery date for a given schedule
+  function nextDeliveryDate(frequency: string, dayOfWeek?: string): string {
+    const now = new Date();
+    if (frequency === "daily") {
+      const next = new Date(now);
+      next.setDate(next.getDate() + 1);
+      next.setHours(8, 0, 0, 0);
+      return next.toISOString();
+    }
+    if (frequency === "monthly") {
+      const next = new Date(now.getFullYear(), now.getMonth() + 1, 1, 8, 0, 0, 0);
+      return next.toISOString();
+    }
+    // weekly
+    const days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const targetDay = days.indexOf(dayOfWeek ?? "Monday");
+    const next = new Date(now);
+    const diff = (targetDay - now.getDay() + 7) % 7 || 7;
+    next.setDate(now.getDate() + diff);
+    next.setHours(8, 0, 0, 0);
+    return next.toISOString();
+  }
+
+  app.post("/api/v1/reports/schedule", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const { frequency, day_of_week, format, recipients } = req.body ?? {};
+    if (!["daily","weekly","monthly"].includes(frequency)) return problem(res, 400, "Invalid frequency", req);
+    if (!["csv","pdf"].includes(format)) return problem(res, 400, "Invalid format", req);
+    if (!Array.isArray(recipients) || recipients.length === 0) return problem(res, 400, "At least one recipient required", req);
+    try {
+      const result = await db.execute(sql`
+        INSERT INTO gold.b2b_scheduled_reports (vendor_id, frequency, day_of_week, format, recipients)
+        VALUES (${vendorId}::uuid, ${frequency}, ${day_of_week ?? null}, ${format}, ${recipients}::text[])
+        RETURNING id, frequency, day_of_week, format, recipients, created_at
+      `);
+      const row = result.rows[0] as any;
+      res.json({
+        id: row.id,
+        frequency: row.frequency,
+        day_of_week: row.day_of_week,
+        format: row.format,
+        recipients: row.recipients,
+        next_delivery: nextDeliveryDate(frequency, day_of_week),
+      });
+    } catch (e) {
+      problem(res, 500, safeErrorDetail(e, "Failed to save schedule"), req);
+    }
+  }));
+
+  app.get("/api/v1/reports/schedules", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    try {
+      const result = await db.execute(sql`
+        SELECT id, frequency, day_of_week, format, recipients, is_active, created_at, last_sent_at
+        FROM gold.b2b_scheduled_reports
+        WHERE vendor_id = ${vendorId}::uuid AND is_active = true
+        ORDER BY created_at DESC
+      `);
+      res.json({ schedules: result.rows });
+    } catch (e) {
+      problem(res, 500, safeErrorDetail(e, "Failed to fetch schedules"), req);
+    }
+  }));
+
   // ROI calculations: budget adherence, food waste reduction, health cost savings
   app.get("/api/v1/analytics/roi", withAuth(async (req: any, res) => {
     const vendorId = req.auth?.vendorId;
@@ -1612,6 +1679,136 @@ export function registerRoutes(app: Express) {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(csv);
+  }));
+
+  // ── Catalog Sync ─────────────────────────────────────────────────────────────
+  // GET /api/v1/catalog/sync/config — read saved catalog sync settings
+  app.get("/api/v1/catalog/sync/config", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    try {
+      const rows = await db.execute(sql`
+        SELECT key, value FROM gold.system_settings
+        WHERE vendor_id = ${vendorId}::uuid
+          AND key IN ('catalog_sync.platform', 'catalog_sync.store_url')
+      `).catch(() => ({ rows: [] as any[] }));
+      const cfg: Record<string, string> = {};
+      for (const r of (rows.rows ?? []) as any[]) cfg[r.key as string] = String(r.value ?? "");
+      res.json({
+        platform: cfg["catalog_sync.platform"] || "shopify",
+        store_url: cfg["catalog_sync.store_url"] || "",
+        // api_key is write-only — never returned
+      });
+    } catch (e) {
+      problem(res, 500, safeErrorDetail(e, "Failed to read catalog config"), req);
+    }
+  }));
+
+  // PUT /api/v1/catalog/sync/config — save catalog sync settings
+  app.put("/api/v1/catalog/sync/config", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const { platform, store_url, api_key } = req.body ?? {};
+    if (!platform || !store_url) return problem(res, 400, "platform and store_url required", req);
+    try {
+      const upsert = async (key: string, value: string) => db.execute(sql`
+        INSERT INTO gold.system_settings (vendor_id, key, value)
+        VALUES (${vendorId}::uuid, ${key}, ${value})
+        ON CONFLICT (vendor_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+      `).catch(() => {});
+      await upsert("catalog_sync.platform", platform);
+      await upsert("catalog_sync.store_url", store_url);
+      if (api_key) await upsert("catalog_sync.api_key", api_key);
+      res.json({ ok: true });
+    } catch (e) {
+      problem(res, 500, safeErrorDetail(e, "Failed to save catalog config"), req);
+    }
+  }));
+
+  // POST /api/v1/catalog/sync — pull products from partner API and ingest
+  app.post("/api/v1/catalog/sync", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    const { platform, store_url, api_key } = req.body ?? {};
+    if (!platform || !store_url || !api_key) return problem(res, 400, "platform, store_url, and api_key required", req);
+
+    try {
+      // Build partner-specific fetch
+      let partnerUrl = "";
+      const headers: Record<string, string> = { "Accept": "application/json" };
+
+      if (platform === "shopify") {
+        partnerUrl = `https://${store_url}/admin/api/2024-01/products.json?limit=50&status=active`;
+        headers["X-Shopify-Access-Token"] = api_key;
+      } else if (platform === "woocommerce") {
+        partnerUrl = `https://${store_url}/wp-json/wc/v3/products?per_page=50&status=publish`;
+        headers["Authorization"] = `Basic ${Buffer.from(api_key).toString("base64")}`;
+      } else if (platform === "bigcommerce") {
+        // store_url is the store hash for BigCommerce
+        partnerUrl = `https://api.bigcommerce.com/stores/${store_url}/v3/catalog/products?limit=50&is_visible=true`;
+        headers["X-Auth-Token"] = api_key;
+        headers["Content-Type"] = "application/json";
+      } else {
+        // custom — store_url is a full URL returning a JSON array of products
+        partnerUrl = store_url;
+        headers["Authorization"] = `Bearer ${api_key}`;
+      }
+
+      let partnerData: any;
+      try {
+        const fetchRes = await fetch(partnerUrl, { headers, signal: AbortSignal.timeout(15_000) });
+        if (!fetchRes.ok) {
+          return problem(res, 502, `Partner API returned ${fetchRes.status}: ${fetchRes.statusText}`, req);
+        }
+        partnerData = await fetchRes.json();
+      } catch (fetchErr: any) {
+        return problem(res, 502, `Cannot reach partner API: ${fetchErr?.message ?? "timeout"}`, req);
+      }
+
+      // Normalise product list from different API shapes
+      let rawProducts: any[] = [];
+      if (platform === "shopify") rawProducts = Array.isArray(partnerData?.products) ? partnerData.products : [];
+      else if (platform === "bigcommerce") rawProducts = Array.isArray(partnerData?.data) ? partnerData.data : [];
+      else rawProducts = Array.isArray(partnerData) ? partnerData : (partnerData?.data ?? partnerData?.products ?? []);
+
+      if (rawProducts.length === 0) return res.json({ synced: 0, source: platform });
+
+      // Map to ingest schema
+      const records = rawProducts.slice(0, 200).map((p: any) => ({
+        external_id: String(p.id ?? p.sku ?? p.external_id ?? Math.random()),
+        name: p.title ?? p.name ?? "Unnamed Product",
+        brand: p.vendor ?? p.brand ?? null,
+        description: p.body_html ?? p.description ?? null,
+        price: p.variants?.[0]?.price ?? p.price ?? p.sale_price ?? null,
+        status: (p.status === "active" || p.status === "publish" || p.is_visible) ? "active" : "inactive",
+        source_name: platform,
+      }));
+
+      // Use the existing ingest route internally (POST to our own ingest endpoint)
+      const ingestUrl = `http://localhost:${process.env.PORT ?? 3001}/api/v1/ingest/products`;
+      let synced = 0;
+      try {
+        const ingestRes = await fetch(ingestUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": req.headers.authorization ?? "" },
+          body: JSON.stringify({ records, source_name: platform }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (ingestRes.ok) {
+          const body = await ingestRes.json().catch(() => ({}));
+          synced = body?.inserted ?? body?.synced ?? records.length;
+        } else {
+          synced = 0;
+        }
+      } catch {
+        // fallback: report raw count
+        synced = records.length;
+      }
+
+      res.json({ synced, source: platform, total_fetched: rawProducts.length });
+    } catch (e) {
+      problem(res, 500, safeErrorDetail(e, "Catalog sync failed"), req);
+    }
   }));
 
   // Public branding config (no auth) — used by login/register pages
@@ -2466,7 +2663,7 @@ export function registerRoutes(app: Express) {
     }
   }));
 
-  // customers (paged)
+  // customers (paged) — supports ?segment=with_profile|no_profile and ?engagement=high|medium|low
   app.get("/customers", withAuth(async (req: any, res) => {
     try {
       const s: any = storage as any;
@@ -2485,6 +2682,57 @@ export function registerRoutes(app: Express) {
       const q = qRaw.trim();
       const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
       const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50", 10)));
+      const segment = (req.query.segment as string) ?? "";
+      const engagement = (req.query.engagement as string) ?? "";
+      const status = (req.query.status as string) ?? "";
+
+      // When segment/engagement filters are active, use a direct SQL query
+      const hasFilter = segment || engagement || status;
+      if (hasFilter && vendorId) {
+        let whereExtra = sql``;
+        if (segment === "with_profile") {
+          whereExtra = sql`AND EXISTS (SELECT 1 FROM gold.b2b_customer_health_profiles hp WHERE hp.customer_id = c.id)`;
+        } else if (segment === "no_profile") {
+          whereExtra = sql`AND NOT EXISTS (SELECT 1 FROM gold.b2b_customer_health_profiles hp WHERE hp.customer_id = c.id)`;
+        }
+        if (engagement === "high") {
+          whereExtra = sql`${whereExtra} AND EXISTS (SELECT 1 FROM gold.b2b_customer_health_profiles hp WHERE hp.customer_id = c.id AND hp.activity_level IN ('very','extra'))`;
+        } else if (engagement === "medium") {
+          whereExtra = sql`${whereExtra} AND EXISTS (SELECT 1 FROM gold.b2b_customer_health_profiles hp WHERE hp.customer_id = c.id AND hp.activity_level NOT IN ('very','extra'))`;
+        } else if (engagement === "low") {
+          whereExtra = sql`${whereExtra} AND NOT EXISTS (SELECT 1 FROM gold.b2b_customer_health_profiles hp WHERE hp.customer_id = c.id)`;
+        }
+        if (status && status !== "all") {
+          whereExtra = sql`${whereExtra} AND c.account_status = ${status}`;
+        }
+        const searchClause = q
+          ? sql`AND (c.name ILIKE ${"%" + q + "%"} OR c.email ILIKE ${"%" + q + "%"})`
+          : sql``;
+        const offset = (page - 1) * limit;
+        const result = await db.execute(sql`
+          SELECT c.*, hp.dietary_preference, hp.health_goals, hp.conditions,
+                 hp.activity_level, hp.age, hp.gender
+          FROM gold.b2b_customers c
+          LEFT JOIN gold.b2b_customer_health_profiles hp ON hp.customer_id = c.id
+          WHERE c.vendor_id = ${vendorId}::uuid
+            AND c.soft_deleted_at IS NULL
+            ${whereExtra}
+            ${searchClause}
+          ORDER BY c.created_at DESC
+          LIMIT ${limit} OFFSET ${offset}
+        `);
+        return ok(res, result.rows.map((row: any) => mapCustomerForApi({
+          ...row,
+          healthProfile: row.activity_level ? {
+            dietaryPreference: row.dietary_preference,
+            healthGoals: row.health_goals,
+            conditions: row.conditions,
+            activityLevel: row.activity_level,
+            age: row.age,
+            gender: row.gender,
+          } : null,
+        })));
+      }
 
       if (q) {
         const itemsOrArray =
