@@ -10,6 +10,8 @@ import auditRouter from "./routes/audit.js";
 import qualityRouter from "./routes/quality.js";
 import alertsRouter from "./routes/alerts.js";
 import campaignsRouter from "./routes/campaigns.js";
+import reportsRouter from "./routes/reports.js";
+import notificationsRouter from "./routes/notifications.js";
 import complianceRouter from "./routes/compliance.js";
 import profileRouter from "./routes/profile.js";
 import webhooksRouter from "./routes/webhooks.js";
@@ -407,6 +409,9 @@ export function registerRoutes(app: Express) {
   // ── Campaigns ──
   app.use("/api/v1/campaigns", campaignsRouter);
 
+  // ── Reports (scheduled reports + SendGrid webhook) ──
+  app.use("/api/v1/reports", reportsRouter);
+
   // ── Compliance ──
   app.use("/api/compliance", complianceRouter);
 
@@ -415,6 +420,9 @@ export function registerRoutes(app: Express) {
 
   // ── Webhooks ──
   app.use("/api/v1/webhooks", webhooksRouter);
+
+  // ── Push Notifications ──
+  app.use("/api/v1/notifications", notificationsRouter);
 
   // health
   app.get("/health", (_req, res) => {
@@ -448,57 +456,55 @@ export function registerRoutes(app: Express) {
     ok(res, { suggestions: [], entities_found: null, fallback: true });
   }));
 
-  // TODO: Uncomment when db:push is run to create user_searches table
   // GET /api/v1/search/recent — fetch user's recent search queries (persistent)
-  // app.get("/api/v1/search/recent", withAuth(async (req: any, res) => {
-  //   try {
-  //     const userId = req.auth?.userId;
-  //     if (!userId) return ok(res, { data: [] });
-  //     const rows = await db
-  //       .selectDistinctOn([schema.userSearches.query], {
-  //         query: schema.userSearches.query,
-  //         searchedAt: schema.userSearches.searchedAt,
-  //       })
-  //       .from(schema.userSearches)
-  //       .where(eq(schema.userSearches.userId, userId))
-  //       .orderBy(schema.userSearches.query, desc(schema.userSearches.searchedAt))
-  //       .limit(10);
-  //     const sorted = rows
-  //       .sort((a, b) => new Date(b.searchedAt!).getTime() - new Date(a.searchedAt!).getTime())
-  //       .slice(0, 5)
-  //       .map(r => r.query);
-  //     return ok(res, { data: sorted });
-  //   } catch (err: any) {
-  //     return ok(res, { data: [] });
-  //   }
-  // }));
+  app.get("/api/v1/search/recent", withAuth(async (req: any, res) => {
+    try {
+      const userId = req.auth?.userId;
+      if (!userId) return ok(res, { data: [] });
+      const rows = await db
+        .selectDistinctOn([schema.userSearches.query], {
+          query: schema.userSearches.query,
+          searchedAt: schema.userSearches.searchedAt,
+        })
+        .from(schema.userSearches)
+        .where(eq(schema.userSearches.userId, userId))
+        .orderBy(schema.userSearches.query, desc(schema.userSearches.searchedAt))
+        .limit(10);
+      const sorted = rows
+        .sort((a, b) => new Date(b.searchedAt!).getTime() - new Date(a.searchedAt!).getTime())
+        .slice(0, 5)
+        .map(r => r.query);
+      return ok(res, { data: sorted });
+    } catch (err: any) {
+      return ok(res, { data: [] });
+    }
+  }));
 
-  // TODO: Uncomment when db:push is run to create user_searches table
   // POST /api/v1/search/recent — save a search query for the current user
-  // app.post("/api/v1/search/recent", withAuth(async (req: any, res) => {
-  //   try {
-  //     const userId = req.auth?.userId;
-  //     const vendorId = req.auth?.vendorId;
-  //     const query = (req.body?.query as string)?.trim();
-  //     if (!userId || !query || query.length < 2) return ok(res, { ok: true });
-  //     await db.delete(schema.userSearches).where(
-  //       and(eq(schema.userSearches.userId, userId), eq(schema.userSearches.query, query))
-  //     );
-  //     await db.insert(schema.userSearches).values({ userId, vendorId: vendorId ?? null, query });
-  //     const all = await db
-  //       .select({ id: schema.userSearches.id, searchedAt: schema.userSearches.searchedAt })
-  //       .from(schema.userSearches)
-  //       .where(eq(schema.userSearches.userId, userId))
-  //       .orderBy(desc(schema.userSearches.searchedAt));
-  //     if (all.length > 10) {
-  //       const toDelete = all.slice(10).map(r => r.id);
-  //       await db.delete(schema.userSearches).where(inArray(schema.userSearches.id, toDelete));
-  //     }
-  //     return ok(res, { ok: true });
-  //   } catch {
-  //     return ok(res, { ok: true });
-  //   }
-  // }));
+  app.post("/api/v1/search/recent", withAuth(async (req: any, res) => {
+    try {
+      const userId = req.auth?.userId;
+      const vendorId = req.auth?.vendorId;
+      const query = (req.body?.query as string)?.trim();
+      if (!userId || !query || query.length < 2) return ok(res, { ok: true });
+      await db.delete(schema.userSearches).where(
+        and(eq(schema.userSearches.userId, userId), eq(schema.userSearches.query, query))
+      );
+      await db.insert(schema.userSearches).values({ userId, vendorId: vendorId ?? null, query });
+      const all = await db
+        .select({ id: schema.userSearches.id, searchedAt: schema.userSearches.searchedAt })
+        .from(schema.userSearches)
+        .where(eq(schema.userSearches.userId, userId))
+        .orderBy(desc(schema.userSearches.searchedAt));
+      if (all.length > 10) {
+        const toDelete = all.slice(10).map(r => r.id);
+        await db.delete(schema.userSearches).where(inArray(schema.userSearches.id, toDelete));
+      }
+      return ok(res, { ok: true });
+    } catch {
+      return ok(res, { ok: true });
+    }
+  }));
 
   // GET /api/v1/search/trending-categories — top categories by product count
   app.get("/api/v1/search/trending-categories", withAuth(async (req: any, res) => {
@@ -960,21 +966,82 @@ export function registerRoutes(app: Express) {
           `).catch(() => ({ rows: [{ total_customers: 0, with_profile: 0, activation_rate: 0 }] as any[] })),
         ]);
 
+        // --- Load vendor branding ---
+        const [brandingRows, vendorRow] = await Promise.all([
+          db.execute(sql`
+            SELECT key, value FROM gold.system_settings
+            WHERE vendor_id = ${vendorId}::uuid
+            AND key IN ('branding.primary_color', 'branding.logo_url', 'branding.secondary_color', 'branding.copyright')
+          `).catch(() => ({ rows: [] })),
+          db.execute(sql`
+            SELECT name FROM gold.vendors WHERE id = ${vendorId}::uuid LIMIT 1
+          `).catch(() => ({ rows: [] })),
+        ]);
+
+        const brandMap: Record<string, string> = {};
+        for (const row of brandingRows.rows) {
+          const v = row.value;
+          brandMap[row.key as string] = typeof v === "string" ? v : (v as any)?.toString?.() ?? "";
+        }
+
+        const rawColor = (brandMap["branding.primary_color"] ?? "").trim();
+        const primaryColor = /^#[0-9a-fA-F]{3,6}$/.test(rawColor) ? rawColor : "#00438f";
+        const rawSecondary = (brandMap["branding.secondary_color"] ?? "").trim();
+        const secondaryColor = /^#[0-9a-fA-F]{3,6}$/.test(rawSecondary) ? rawSecondary : "#6b7280";
+        const logoUrl = brandMap["branding.logo_url"] ?? null;
+        const copyrightText = brandMap["branding.copyright"] ?? "";
+        const vendorName: string = (vendorRow.rows?.[0] as any)?.name ?? "Analytics Report";
+
+        let logoBuffer: Buffer | null = null;
+        if (logoUrl) {
+          logoBuffer = await fetch(logoUrl)
+            .then(r => r.ok ? r.arrayBuffer().then(ab => Buffer.from(ab)) : null)
+            .catch(() => null);
+        }
+        // --- End branding load ---
+
         const doc = new PDFDocument({ margin: 50, size: "A4" });
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="analytics-report-${dateStr}.pdf"`);
         doc.pipe(res);
 
-        const blue = "#00438f";
+        const blue = primaryColor;
         const gray = "#64748b";
         const lightGray = "#f1f5f9";
 
+        let pageNum = 1;
+        const pageW = doc.page.width;
+        const pageH = doc.page.height;
+
+        const addPageFooter = () => {
+          const margin = 50;
+          const fy = pageH - 35;
+          doc.save()
+            .moveTo(margin, fy - 6)
+            .lineTo(pageW - margin, fy - 6)
+            .strokeColor(secondaryColor).lineWidth(0.5).stroke()
+            .restore();
+          doc.fillColor(gray).fontSize(8).font("Helvetica")
+            .text(vendorName, margin, fy, { width: 200, lineBreak: false });
+          if (copyrightText) {
+            doc.fillColor(gray).fontSize(8).font("Helvetica")
+              .text(copyrightText, margin + 210, fy, { width: pageW - margin * 2 - 280, align: "center", lineBreak: false });
+          }
+          doc.fillColor(gray).fontSize(8).font("Helvetica")
+            .text(`Page ${pageNum}`, pageW - margin - 50, fy, { width: 50, align: "right", lineBreak: false });
+        };
+
         // ── Cover ──
-        doc.rect(0, 0, doc.page.width, 120).fill(blue);
+        doc.rect(0, 0, pageW, 120).fill(blue);
+        if (logoBuffer) {
+          doc.image(logoBuffer, pageW - 160, 50, { width: 100, fit: [100, 50] });
+        }
         doc.fillColor("white").fontSize(24).font("Helvetica-Bold")
           .text("Analytics Report", 50, 40, { align: "left" });
         doc.fontSize(12).font("Helvetica")
           .text(`Generated: ${dateStr}  ·  Period: Last ${days} days`, 50, 75);
+        doc.fontSize(11).font("Helvetica")
+          .text(vendorName, 50, 95);
         doc.fillColor("#0f172a").moveDown(3);
 
         const sectionTitle = (title: string) => {
@@ -982,8 +1049,8 @@ export function registerRoutes(app: Express) {
             .fontSize(14).font("Helvetica-Bold").fillColor(blue)
             .text(title)
             .moveDown(0.3)
-            .moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y)
-            .strokeColor("#e2e8f0").lineWidth(1).stroke()
+            .moveTo(50, doc.y).lineTo(pageW - 50, doc.y)
+            .strokeColor(secondaryColor).lineWidth(1).stroke()
             .moveDown(0.4);
         };
 
@@ -1019,14 +1086,14 @@ export function registerRoutes(app: Express) {
           const custMap = new Map((ovCustomers.rows ?? []).map((r: any) => [String(r.day), r.new_customers ?? 0]));
           for (const d of Array.from(daySet).sort()) {
             tableRow([d, String(prodMap.get(d) ?? 0), String(custMap.get(d) ?? 0)], [160, 160, 160]);
-            if (doc.y > doc.page.height - 80) { doc.addPage(); }
+            if (doc.y > doc.page.height - 80) { addPageFooter(); pageNum++; doc.addPage(); }
           }
         } else {
           doc.fontSize(10).fillColor(gray).text("No data for this period.").moveDown(0.5);
         }
 
         // ── Section 2: Health ──
-        doc.addPage();
+        addPageFooter(); pageNum++; doc.addPage();
         sectionTitle("2. Health Distribution");
 
         const renderHealthTable = (title: string, rows: any[]) => {
@@ -1038,7 +1105,7 @@ export function registerRoutes(app: Express) {
           tableRow(["Name", "Members"], [320, 100], true);
           for (const r of rows) {
             tableRow([String(r.name ?? ""), String(r.customer_count ?? 0)], [320, 100]);
-            if (doc.y > doc.page.height - 80) { doc.addPage(); }
+            if (doc.y > doc.page.height - 80) { addPageFooter(); pageNum++; doc.addPage(); }
           }
           doc.moveDown(0.5);
         };
@@ -1048,7 +1115,7 @@ export function registerRoutes(app: Express) {
         renderHealthTable("Top Dietary Preferences", hlDiets.rows ?? []);
 
         // ── Section 3: Engagement ──
-        doc.addPage();
+        addPageFooter(); pageNum++; doc.addPage();
         sectionTitle("3. Engagement");
         const eng = (engRow.rows?.[0] as any) ?? { total_customers: 0, with_profile: 0, activation_rate: 0 };
         doc.fontSize(10).font("Helvetica").fillColor("#1e293b");
@@ -1056,8 +1123,127 @@ export function registerRoutes(app: Express) {
         doc.text(`With health profile: ${eng.with_profile ?? 0}`).moveDown(0.2);
         doc.text(`Activation rate: ${eng.activation_rate ?? 0}%`).moveDown(0.8);
 
+        addPageFooter();
         doc.end();
         return;
+      }
+
+      // ── PPTX: PowerPoint deck ───────────────────────────────────────────
+      if (format === "pptx") {
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const [ovProducts, ovCustomers, hlAllergens, hlConditions, engRow] = await Promise.all([
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, count(*)::int AS cnt
+            FROM gold.b2b_products WHERE vendor_id = ${vendorId}::uuid
+            AND created_at >= now() - (${days} || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] })),
+          db.execute(sql`
+            SELECT date_trunc('day', created_at)::date AS day, count(*)::int AS cnt
+            FROM gold.b2b_customers WHERE vendor_id = ${vendorId}::uuid
+            AND created_at >= now() - (${days} || ' days')::interval
+            GROUP BY 1 ORDER BY 1
+          `).catch(() => ({ rows: [] })),
+          db.execute(sql`
+            SELECT allergen AS name, count(*)::int AS customer_count
+            FROM gold.b2b_customer_allergens ca
+            JOIN gold.b2b_customers c ON c.id = ca.customer_id
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+          `).catch(() => ({ rows: [] })),
+          db.execute(sql`
+            SELECT condition, count(*)::int AS customer_count
+            FROM gold.b2b_customer_conditions cc
+            JOIN gold.b2b_customers c ON c.id = cc.customer_id
+            WHERE c.vendor_id = ${vendorId}::uuid
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+          `).catch(() => ({ rows: [] })),
+          db.execute(sql`
+            SELECT count(*)::int AS total_customers,
+                   count(hp.customer_id)::int AS with_profile,
+                   ROUND(count(hp.customer_id) * 100.0 / NULLIF(count(*), 0), 1) AS activation_rate
+            FROM gold.b2b_customers c
+            LEFT JOIN gold.b2b_customer_health_profiles hp ON hp.customer_id = c.id
+            WHERE c.vendor_id = ${vendorId}::uuid
+          `).catch(() => ({ rows: [{ total_customers: 0, with_profile: 0, activation_rate: 0 }] as any[] })),
+        ]);
+
+        // --- Load vendor branding for pptx ---
+        const pptxBrandingRows = await db.execute(sql`
+          SELECT key, value FROM gold.system_settings
+          WHERE vendor_id = ${vendorId}::uuid
+          AND key IN ('branding.primary_color', 'branding.logo_url')
+        `).catch(() => ({ rows: [] }));
+        const pptxBrandMap: Record<string, string> = {};
+        for (const row of pptxBrandingRows.rows) {
+          const v = row.value;
+          pptxBrandMap[row.key as string] = typeof v === "string" ? v : (v as any)?.toString?.() ?? "";
+        }
+        const pptxRawColor = (pptxBrandMap["branding.primary_color"] ?? "").trim();
+        const pptxBlue = /^#[0-9a-fA-F]{3,6}$/.test(pptxRawColor) ? pptxRawColor : "#00438f";
+        const pptxLogoUrl = pptxBrandMap["branding.logo_url"] ?? null;
+        let pptxLogoBuffer: Buffer | null = null;
+        if (pptxLogoUrl) {
+          pptxLogoBuffer = await fetch(pptxLogoUrl)
+            .then(r => r.ok ? r.arrayBuffer().then(ab => Buffer.from(ab)) : null)
+            .catch(() => null);
+        }
+        // ---
+
+        const pptxgen = require("pptxgenjs");
+        const prs = new pptxgen();
+        const blueHex = pptxBlue.replace("#", "");
+
+        // Slide 1 — Cover
+        const s1 = prs.addSlide();
+        s1.background = { color: blueHex };
+        s1.addText("Analytics Report", { x: 0.5, y: 1.5, w: 9, h: 1.2, fontSize: 40, bold: true, color: "FFFFFF" });
+        s1.addText(`Period: Last ${days} days  •  Generated ${dateStr}`, { x: 0.5, y: 2.8, w: 9, h: 0.5, fontSize: 16, color: "FFFFFF" });
+        if (pptxLogoBuffer) {
+          s1.addImage({ data: `image/png;base64,${pptxLogoBuffer.toString("base64")}`, x: 8, y: 0.3, w: 1.5, h: 0.75 });
+        }
+
+        // Slide 2 — Engagement KPIs
+        const eng = engRow.rows[0] ?? { total_customers: 0, with_profile: 0, activation_rate: 0 };
+        const s2 = prs.addSlide();
+        s2.addText("Engagement", { x: 0.5, y: 0.3, w: 9, h: 0.6, fontSize: 24, bold: true, color: blueHex });
+        const kpis = [
+          { label: "Total Customers", value: String(eng.total_customers ?? 0) },
+          { label: "With Health Profile", value: String(eng.with_profile ?? 0) },
+          { label: "Activation Rate", value: `${eng.activation_rate ?? 0}%` },
+        ];
+        kpis.forEach((kpi, i) => {
+          s2.addText(kpi.value, { x: 0.5 + i * 3.2, y: 1.2, w: 3, h: 1, fontSize: 36, bold: true, color: blueHex });
+          s2.addText(kpi.label, { x: 0.5 + i * 3.2, y: 2.3, w: 3, h: 0.4, fontSize: 12, color: "64748B" });
+        });
+
+        // Slide 3 — Health Distribution
+        const s3 = prs.addSlide();
+        s3.addText("Health Distribution", { x: 0.5, y: 0.3, w: 9, h: 0.6, fontSize: 24, bold: true, color: blueHex });
+        const tableRows3: any[][] = [
+          [{ text: "Category", options: { bold: true } }, { text: "Name", options: { bold: true } }, { text: "Members", options: { bold: true } }],
+          ...hlAllergens.rows.slice(0, 5).map((r: any) => [{ text: "Allergen" }, { text: String(r.name) }, { text: String(r.customer_count) }]),
+          ...hlConditions.rows.slice(0, 5).map((r: any) => [{ text: "Condition" }, { text: String(r.condition) }, { text: String(r.customer_count) }]),
+        ];
+        s3.addTable(tableRows3, { x: 0.5, y: 1.1, w: 9, colW: [2.5, 4.5, 2], fontSize: 11 });
+
+        // Slide 4 — Overview trend table
+        const s4 = prs.addSlide();
+        s4.addText("Overview Trends", { x: 0.5, y: 0.3, w: 9, h: 0.6, fontSize: 24, bold: true, color: blueHex });
+        const ovRows4: any[][] = [
+          [{ text: "Day", options: { bold: true } }, { text: "New Products", options: { bold: true } }, { text: "New Customers", options: { bold: true } }],
+          ...ovProducts.rows.slice(0, 10).map((r: any, i: number) => [
+            { text: String(r.day ?? "") },
+            { text: String(r.cnt ?? 0) },
+            { text: String(ovCustomers.rows[i]?.cnt ?? 0) },
+          ]),
+        ];
+        s4.addTable(ovRows4, { x: 0.5, y: 1.1, w: 9, colW: [3, 3, 3], fontSize: 11 });
+
+        const pptxBuffer = await prs.write({ outputType: "nodebuffer" });
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+        res.setHeader("Content-Disposition", `attachment; filename="analytics-report-${dateStr}.pptx"`);
+        return res.end(pptxBuffer);
       }
 
       let rows: Record<string, unknown>[] = [];
@@ -1545,6 +1731,63 @@ export function registerRoutes(app: Express) {
       ok(res, { segments });
     } catch (e: any) {
       problem(res, 500, safeErrorDetail(e, "Segment query failed"), req);
+    }
+  }));
+
+  // Churn / at-risk identification
+  // Healthy   = active + updated within 30 days
+  // At-risk   = active + NOT updated within 30 days (stale engagement signal)
+  // Churned   = account_status = 'inactive' or 'archived'
+  app.get("/api/v1/analytics/churn", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+    try {
+      const [countsResult, atRiskResult] = await Promise.all([
+        db.execute(sql`
+          SELECT
+            COUNT(*) FILTER (
+              WHERE account_status = 'active'
+                AND updated_at >= now() - interval '30 days'
+            )::int AS healthy,
+            COUNT(*) FILTER (
+              WHERE account_status = 'active'
+                AND updated_at < now() - interval '30 days'
+            )::int AS at_risk,
+            COUNT(*) FILTER (
+              WHERE account_status IN ('inactive', 'archived')
+            )::int AS churned
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid
+        `).catch(() => ({ rows: [{ healthy: 0, at_risk: 0, churned: 0 }] as any[] })),
+        db.execute(sql`
+          SELECT id, full_name, email, updated_at, customer_segment
+          FROM gold.b2b_customers
+          WHERE vendor_id = ${vendorId}::uuid
+            AND account_status = 'active'
+            AND updated_at < now() - interval '30 days'
+          ORDER BY updated_at ASC
+          LIMIT 10
+        `).catch(() => ({ rows: [] as any[] })),
+      ]);
+
+      const counts = (countsResult.rows?.[0] as any) ?? { healthy: 0, at_risk: 0, churned: 0 };
+      const healthy = counts.healthy ?? 0;
+      const atRisk = counts.at_risk ?? 0;
+      const churned = counts.churned ?? 0;
+      const total = healthy + atRisk + churned;
+      const atRiskRate = total > 0 ? Math.round((atRisk / total) * 1000) / 10 : 0;
+
+      const atRiskCustomers = ((atRiskResult.rows ?? []) as any[]).map(r => ({
+        id: r.id,
+        fullName: r.full_name ?? "",
+        email: r.email ?? "",
+        updatedAt: r.updated_at,
+        customerSegment: r.customer_segment ?? null,
+      }));
+
+      ok(res, { healthy, atRisk, churned, atRiskRate, atRiskCustomers });
+    } catch (e: any) {
+      problem(res, 500, safeErrorDetail(e, "Churn query failed"), req);
     }
   }));
 
@@ -2430,7 +2673,34 @@ export function registerRoutes(app: Express) {
     });
     if (ragResult?.substitutes?.length) return ok(res, ragResult);
 
-    return ok(res, { substitutes: [], fallback: true });
+    // SQL fallback: find active products in the same category from the same vendor
+    try {
+      const fallbackRows = await db.execute(sql`
+        SELECT p.id, p.name, p.brand, p.description,
+               0.5 AS score, 'Similar category' AS reason
+        FROM gold.b2b_products p
+        WHERE p.vendor_id = ${vendorId}::uuid
+          AND p.id != ${productId}::uuid
+          AND p.status = 'active'
+          AND p.category_id = (
+            SELECT category_id FROM gold.b2b_products
+            WHERE id = ${productId}::uuid
+          )
+        ORDER BY RANDOM()
+        LIMIT ${limit}
+      `);
+      const substitutes = (fallbackRows.rows ?? []).map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        brand: r.brand ?? null,
+        description: r.description ?? null,
+        score: r.score,
+        reason: r.reason,
+      }));
+      return ok(res, { substitutes, fallback: true });
+    } catch {
+      return ok(res, { substitutes: [], fallback: true });
+    }
   }));
 
   // Product substitutions (PRD-09)
@@ -2454,7 +2724,34 @@ export function registerRoutes(app: Express) {
     });
     if (ragResult?.substitutes?.length) return ok(res, ragResult);
 
-    ok(res, { substitutes: [], fallback: true });
+    // SQL fallback: find active products in the same category from the same vendor
+    try {
+      const fallbackRows = await db.execute(sql`
+        SELECT p.id, p.name, p.brand, p.description,
+               0.5 AS score, 'Similar category' AS reason
+        FROM gold.b2b_products p
+        WHERE p.vendor_id = ${vendorId}::uuid
+          AND p.id != ${productId}::uuid
+          AND p.status = 'active'
+          AND p.category_id = (
+            SELECT category_id FROM gold.b2b_products
+            WHERE id = ${productId}::uuid
+          )
+        ORDER BY RANDOM()
+        LIMIT ${limit}
+      `);
+      const substitutes = (fallbackRows.rows ?? []).map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        brand: r.brand ?? null,
+        description: r.description ?? null,
+        score: r.score,
+        reason: r.reason,
+      }));
+      ok(res, { substitutes, fallback: true });
+    } catch {
+      ok(res, { substitutes: [], fallback: true });
+    }
   }));
 
   // --- CREATE product ---
@@ -2601,39 +2898,81 @@ export function registerRoutes(app: Express) {
       const result = await db.execute(sql`
         SELECT
           c.id,
+          c.external_id,
+          c.full_name,
           c.first_name,
           c.last_name,
           c.email,
+          c.phone,
+          c.date_of_birth,
+          c.age,
+          c.gender,
           c.account_status,
-          c.ingest_source,
+          c.customer_segment,
+          c.customer_tier,
+          c.location_country,
+          c.location_region,
+          c.location_city,
+          c.location_postal_code,
+          c.email_opt_out,
+          c.custom_tags,
+          c.notes,
+          c.source_system,
           c.created_at,
-          COALESCE(pqs.quality_score::text, '') AS quality_score
+          c.updated_at,
+          CASE WHEN hp.customer_id IS NOT NULL THEN true ELSE false END AS has_health_profile
         FROM gold.b2b_customers c
-        LEFT JOIN LATERAL (
-          SELECT quality_score FROM gold.product_quality_scores
-          WHERE vendor_id = c.vendor_id
-          ORDER BY created_at DESC LIMIT 1
-        ) pqs ON true
+        LEFT JOIN (
+          SELECT DISTINCT customer_id FROM gold.b2b_customer_health_profiles
+        ) hp ON hp.customer_id = c.id
         WHERE c.vendor_id = ${vendorId}::uuid
         ORDER BY c.created_at DESC
         LIMIT 10000
       `);
 
       const rows = result.rows as any[];
-      const header = ["id", "first_name", "last_name", "email", "status", "ingest_source", "created_at", "quality_score"];
+      const header = [
+        "id", "external_id", "full_name", "first_name", "last_name",
+        "email", "phone", "date_of_birth", "age", "gender",
+        "status", "customer_segment", "customer_tier",
+        "location_country", "location_region", "location_city", "location_postal_code",
+        "email_opt_out", "custom_tags", "notes", "source_system",
+        "created_at", "updated_at", "has_health_profile",
+      ];
       const dateStr = new Date().toISOString().slice(0, 10);
 
+      const toRow = (r: any) => [
+        r.id,
+        r.external_id ?? "",
+        r.full_name ?? "",
+        r.first_name ?? "",
+        r.last_name ?? "",
+        r.email ?? "",
+        r.phone ?? "",
+        r.date_of_birth ? String(r.date_of_birth).slice(0, 10) : "",
+        r.age ?? "",
+        r.gender ?? "",
+        r.account_status ?? "",
+        r.customer_segment ?? "",
+        r.customer_tier ?? "",
+        r.location_country ?? "",
+        r.location_region ?? "",
+        r.location_city ?? "",
+        r.location_postal_code ?? "",
+        r.email_opt_out ? "true" : "false",
+        Array.isArray(r.custom_tags) ? r.custom_tags.join(";") : (r.custom_tags ?? ""),
+        r.notes ?? "",
+        r.source_system ?? "",
+        r.created_at ? new Date(r.created_at).toISOString() : "",
+        r.updated_at ? new Date(r.updated_at).toISOString() : "",
+        r.has_health_profile ? "true" : "false",
+      ];
+
       if (format === "xlsx") {
-        const sheetData = [
-          header,
-          ...rows.map((r) => [
-            r.id, r.first_name, r.last_name, r.email,
-            r.account_status, r.ingest_source,
-            r.created_at ? new Date(r.created_at).toISOString() : "",
-            r.quality_score,
-          ]),
-        ];
+        const sheetData = [header, ...rows.map(toRow)];
         const ws = XLSX.utils.aoa_to_sheet(sheetData);
+        // Auto-width columns
+        ws["!cols"] = header.map((h) => ({ wch: Math.max(h.length + 2, 12) }));
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Members");
         const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
@@ -2649,11 +2988,7 @@ export function registerRoutes(app: Express) {
       };
       const lines = [
         header.join(","),
-        ...rows.map((r) =>
-          [r.id, r.first_name, r.last_name, r.email, r.account_status, r.ingest_source, r.created_at, r.quality_score]
-            .map(escape)
-            .join(",")
-        ),
+        ...rows.map((r) => toRow(r).map(escape).join(",")),
       ];
       res.setHeader("Content-Type", "text/csv");
       res.setHeader("Content-Disposition", `attachment; filename="members-${dateStr}.csv"`);
@@ -3236,6 +3571,59 @@ export function registerRoutes(app: Express) {
     }
   }));
 
+  // Bulk customer import — POST /api/v1/customers/batch
+  app.post("/api/v1/customers/batch", withAuth(async (req: any, res) => {
+    const vendorId = req.auth?.vendorId;
+    const userId   = req.auth?.userId ?? null;
+    if (!vendorId) return problem(res, 403, "No vendor access", req);
+
+    const rows: Record<string, string>[] = req.body?.customers ?? [];
+    if (!Array.isArray(rows) || rows.length === 0)
+      return problem(res, 400, "No customers provided", req);
+    if (rows.length > 500)
+      return problem(res, 400, "Maximum 500 rows per batch", req);
+
+    let inserted = 0, updated = 0;
+    const errors: { row: number; message: string }[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const email    = (r.email ?? "").trim().toLowerCase();
+      const fullName = (r.full_name ?? r.fullName ?? r.name ?? "").trim();
+      const extId    = (r.external_id ?? r.externalId ?? email).trim();
+      if (!email || !fullName) {
+        errors.push({ row: i + 2, message: "email and full_name are required" });
+        continue;
+      }
+      try {
+        const result = await db.execute(sql`
+          INSERT INTO gold.b2b_customers
+            (id, vendor_id, external_id, email, full_name, dob, age, gender, phone, account_status, created_at, updated_at)
+          VALUES (
+            gen_random_uuid(), ${vendorId}::uuid, ${extId}, ${email}, ${fullName},
+            ${r.dob || null}, ${r.age ? parseInt(r.age, 10) : null}, ${r.gender || null}, ${r.phone || null},
+            'active', now(), now()
+          )
+          ON CONFLICT (vendor_id, external_id) DO UPDATE SET
+            email      = EXCLUDED.email,
+            full_name  = EXCLUDED.full_name,
+            updated_at = now()
+          RETURNING (xmax = 0) AS is_insert
+        `);
+        if (result.rows[0]?.is_insert) inserted++; else updated++;
+      } catch (e: any) {
+        errors.push({ row: i + 2, message: e.message ?? "Insert failed" });
+      }
+    }
+
+    await db.execute(sql`
+      INSERT INTO gold.audit_log (vendor_id, user_id, action, resource_type, metadata, created_at)
+      VALUES (${vendorId}::uuid, ${userId ? `${userId}::uuid` : null}, 'bulk_import', 'customer',
+        ${JSON.stringify({ inserted, updated, errors: errors.length })}::jsonb, now())
+    `).catch(() => {});
+
+    return ok(res, { inserted, updated, errors, total: rows.length });
+  }));
 
   // customer matches (uses services/matching if available)
   app.get("/matching/:customerId", withAuth(async (req: any, res) => {

@@ -10,6 +10,7 @@ import { setupVite, serveStatic, log } from "./vite.js";
 import onboardRouter from "./routes/onboard.js";
 import invitationsRouter from "./routes/invitations.js";
 import { startRevocationCron } from "./lib/revocation-cron.js";
+import { startReportCron } from "./lib/report-cron.js";
 import { openApiSpec } from "./lib/openapi.js";
 import { requireAuth } from "./lib/auth.js";
 
@@ -70,6 +71,7 @@ export default app;
     "/api/metrics",                      // metrics
     "/api/config",                       // branding (public, no auth)
     "/api/docs",                         // Swagger UI (B2B-061)
+    "/api/v1/reports",                   // scheduled reports + SendGrid webhook
   ];
 
   app.all(/^\/api(\/|$)/, (req, res, next) => {
@@ -188,6 +190,7 @@ export default app;
   }
 
   startRevocationCron();
+  startReportCron();
 
   server.listen(PORT, HOST, () => {
     logger.info(`Listening on http://${HOST}:${PORT}`);

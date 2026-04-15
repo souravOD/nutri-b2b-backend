@@ -6,6 +6,8 @@ import { Router, type Request, type Response } from "express";
 import { requireAuth, requirePermissionMiddleware } from "../lib/auth.js";
 import { db } from "../lib/database.js";
 import { sql } from "drizzle-orm";
+import { sendBulkEmail } from "../services/email/bulk-sender.js";
+import { renderCampaignEmail } from "../services/email/templates.js";
 
 const router = Router();
 
@@ -14,8 +16,9 @@ type Segment = typeof VALID_SEGMENTS[number];
 const VALID_STATUSES = ["draft", "active", "sent"] as const;
 
 // ── Segment SQL helper ───────────────────────────────────────────────────────
-// Returns { count, members[] } for a vendor + segment combination
-async function resolveSegment(vendorId: string, segment: Segment) {
+// Returns { count, members[] } for a vendor + segment combination.
+// Pass excludeOptOut=true when sending to filter out email_opt_out customers.
+async function resolveSegment(vendorId: string, segment: Segment, excludeOptOut = false) {
   let whereClause: string;
   switch (segment) {
     case "active":
@@ -36,11 +39,18 @@ async function resolveSegment(vendorId: string, segment: Segment) {
       break;
   }
 
+  // Compliance: exclude customers who have opted out of marketing emails.
+  // Requires the email_opt_out column (migration: ALTER TABLE gold.b2b_customers ADD COLUMN email_opt_out BOOLEAN DEFAULT FALSE).
+  const optOutFilter = excludeOptOut
+    ? `AND (c.email_opt_out IS NULL OR c.email_opt_out = false) AND c.email IS NOT NULL`
+    : "";
+
   const countResult = await db.execute(sql`
     SELECT COUNT(*)::int AS count
     FROM gold.b2b_customers c
     WHERE c.vendor_id = ${vendorId}::uuid
       AND ${sql.raw(whereClause)}
+      ${sql.raw(optOutFilter)}
   `);
   const count = (countResult.rows?.[0] as any)?.count ?? 0;
 
@@ -49,10 +59,46 @@ async function resolveSegment(vendorId: string, segment: Segment) {
     FROM gold.b2b_customers c
     WHERE c.vendor_id = ${vendorId}::uuid
       AND ${sql.raw(whereClause)}
+      ${sql.raw(optOutFilter)}
     ORDER BY c.created_at DESC
     LIMIT 100
   `);
   return { count, members: membersResult.rows ?? [] };
+}
+
+// ── Send recipient resolver (no LIMIT) ───────────────────────────────────────
+// Returns all opted-in emails for a segment. Used exclusively by the send endpoint.
+async function resolveAllRecipients(vendorId: string, segment: Segment): Promise<string[]> {
+  let whereClause: string;
+  switch (segment) {
+    case "active":
+      whereClause = `c.account_status = 'active'`;
+      break;
+    case "inactive":
+      whereClause = `c.account_status = 'inactive'`;
+      break;
+    case "with_profile":
+      whereClause = `EXISTS (
+        SELECT 1 FROM gold.b2b_customer_health_profiles hp
+        WHERE hp.customer_id = c.id OR hp.b2b_customer_id = c.id
+      )`;
+      break;
+    case "all":
+    default:
+      whereClause = `true`;
+      break;
+  }
+
+  const result = await db.execute(sql`
+    SELECT c.email
+    FROM gold.b2b_customers c
+    WHERE c.vendor_id = ${vendorId}::uuid
+      AND c.email IS NOT NULL
+      AND (c.email_opt_out IS NULL OR c.email_opt_out = false)
+      AND ${sql.raw(whereClause)}
+    ORDER BY c.id
+  `);
+  return (result.rows ?? []).map((r: any) => r.email).filter(Boolean);
 }
 
 // ── GET /campaigns/segment-preview ──────────────────────────────────────────
@@ -242,6 +288,58 @@ router.delete(
     } catch (err: any) {
       console.error("[campaigns] DELETE /:id error:", err?.message || err);
       return res.status(500).json({ code: "internal_error", detail: "Failed to delete campaign" });
+    }
+  },
+);
+
+// ── POST /campaigns/:id/send ─────────────────────────────────────────────────
+// Sends the campaign to all opted-in segment recipients via SendGrid.
+// Guards against double-sends (409 if already sent).
+router.post(
+  "/:id/send",
+  requireAuth as any,
+  requirePermissionMiddleware("manage:settings") as any,
+  async (req: Request, res: Response) => {
+    const vendorId = (req as any).auth?.vendorId;
+    if (!vendorId) return res.status(403).json({ code: "forbidden", detail: "No vendor context" });
+
+    const { id } = req.params;
+    try {
+      // 1. Fetch campaign
+      const campResult = await db.execute(sql`
+        SELECT id, name, target_segment, subject, message, status
+        FROM gold.b2b_campaigns
+        WHERE id = ${id}::uuid AND vendor_id = ${vendorId}::uuid
+      `);
+      if (!campResult.rows?.length) {
+        return res.status(404).json({ code: "not_found", detail: "Campaign not found" });
+      }
+      const campaign = campResult.rows[0] as any;
+      if (campaign.status === "sent") {
+        return res.status(409).json({ code: "already_sent", detail: "Campaign has already been sent" });
+      }
+
+      // 2. Resolve ALL opted-in recipients (no LIMIT — resolveSegment caps at 100 for previews)
+      const emails = await resolveAllRecipients(vendorId, campaign.target_segment as Segment);
+      if (!emails.length) {
+        return res.status(422).json({ code: "no_recipients", detail: "No opted-in recipients found for this segment" });
+      }
+
+      // 3. Render and send
+      const html = renderCampaignEmail(campaign.subject, campaign.message);
+      const result = await sendBulkEmail(emails, campaign.subject, html);
+
+      // 4. Mark campaign as sent
+      await db.execute(sql`
+        UPDATE gold.b2b_campaigns
+        SET status = 'sent', sent_at = now(), recipient_count = ${emails.length}, updated_at = now()
+        WHERE id = ${id}::uuid AND vendor_id = ${vendorId}::uuid
+      `);
+
+      return res.json({ ok: true, sent: result.sent, skipped: result.skipped });
+    } catch (err: any) {
+      console.error("[campaigns] POST /:id/send error:", err?.message || err);
+      return res.status(500).json({ code: "internal_error", detail: "Failed to send campaign" });
     }
   },
 );

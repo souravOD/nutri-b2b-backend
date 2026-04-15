@@ -194,6 +194,9 @@ export const customers = gold.table("b2b_customers", {
   customerSegment: text("customer_segment"),
   customerTier: text("customer_tier"),
 
+  // Compliance — set to true on bounce/spam complaint via Resend webhook
+  emailOptOut: boolean("email_opt_out").notNull().default(false),
+
   // Compatibility-layer fields (gold 2 schema: custom_tags, product_notes only)
   customTags: text("custom_tags").array(),
   notes: text("notes"),
@@ -635,17 +638,16 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 });
 
-// TODO: Uncomment when db:push is run to create this table
-// export const userSearches = pgTable("user_searches", {
-//   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-//   userId: uuid("user_id").notNull(),
-//   vendorId: uuid("vendor_id"),
-//   query: text("query").notNull(),
-//   searchedAt: timestamp("searched_at").notNull().default(sql`now()`),
-// }, (t) => ({
-//   userIdx: index("idx_user_searches_user").on(t.userId),
-//   searchedAtIdx: index("idx_user_searches_at").on(t.searchedAt),
-// }));
+export const userSearches = pgTable("user_searches", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: uuid("user_id").notNull(),
+  vendorId: uuid("vendor_id"),
+  query: text("query").notNull(),
+  searchedAt: timestamp("searched_at").notNull().default(sql`now()`),
+}, (t) => ({
+  userIdx: index("idx_user_searches_user").on(t.userId),
+  searchedAtIdx: index("idx_user_searches_at").on(t.searchedAt),
+}));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compliance / Security tables (DB-007 — previously raw SQL only)
