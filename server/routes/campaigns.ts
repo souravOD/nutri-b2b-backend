@@ -8,17 +8,29 @@ import { db } from "../lib/database.js";
 import { sql } from "drizzle-orm";
 import { sendBulkEmail } from "../services/email/bulk-sender.js";
 import { renderCampaignEmail } from "../services/email/templates.js";
+import { resolveSegmentById, resolveSegmentEmailsById } from "./segments.js";
 
 const router = Router();
 
 const VALID_SEGMENTS = ["all", "active", "with_profile", "inactive"] as const;
 type Segment = typeof VALID_SEGMENTS[number];
 const VALID_STATUSES = ["draft", "active", "sent"] as const;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidSegment(s: string): boolean {
+  return VALID_SEGMENTS.includes(s as Segment) || UUID_RE.test(s);
+}
 
 // ── Segment SQL helper ───────────────────────────────────────────────────────
 // Returns { count, members[] } for a vendor + segment combination.
 // Pass excludeOptOut=true when sending to filter out email_opt_out customers.
-async function resolveSegment(vendorId: string, segment: Segment, excludeOptOut = false) {
+// If segment is a UUID, resolves via the b2b_member_segments rule engine.
+async function resolveSegment(vendorId: string, segment: string, excludeOptOut = false) {
+  // Delegate to saved segment rule engine when segment is a UUID.
+  if (UUID_RE.test(segment)) {
+    return resolveSegmentById(vendorId, segment, excludeOptOut, 100);
+  }
+
   let whereClause: string;
   switch (segment) {
     case "active":
@@ -68,7 +80,12 @@ async function resolveSegment(vendorId: string, segment: Segment, excludeOptOut 
 
 // ── Send recipient resolver (no LIMIT) ───────────────────────────────────────
 // Returns all opted-in emails for a segment. Used exclusively by the send endpoint.
-async function resolveAllRecipients(vendorId: string, segment: Segment): Promise<string[]> {
+// If segment is a UUID, resolves via the b2b_member_segments rule engine.
+async function resolveAllRecipients(vendorId: string, segment: string): Promise<string[]> {
+  if (UUID_RE.test(segment)) {
+    return resolveSegmentEmailsById(vendorId, segment);
+  }
+
   let whereClause: string;
   switch (segment) {
     case "active":
@@ -113,8 +130,8 @@ router.get(
     if (!vendorId) return res.status(403).json({ code: "forbidden", detail: "No vendor context" });
 
     const segment = (req.query.segment as string) ?? "all";
-    if (!VALID_SEGMENTS.includes(segment as Segment)) {
-      return res.status(400).json({ code: "bad_request", detail: `segment must be one of: ${VALID_SEGMENTS.join(", ")}` });
+    if (!isValidSegment(segment)) {
+      return res.status(400).json({ code: "bad_request", detail: `segment must be one of: ${VALID_SEGMENTS.join(", ")} or a saved segment UUID` });
     }
 
     try {
@@ -164,8 +181,8 @@ router.post(
     if (!name?.trim()) return res.status(400).json({ code: "bad_request", detail: "name is required" });
     if (!subject?.trim()) return res.status(400).json({ code: "bad_request", detail: "subject is required" });
     if (!message?.trim()) return res.status(400).json({ code: "bad_request", detail: "message is required" });
-    if (!VALID_SEGMENTS.includes(target_segment)) {
-      return res.status(400).json({ code: "bad_request", detail: `target_segment must be one of: ${VALID_SEGMENTS.join(", ")}` });
+    if (!isValidSegment(target_segment)) {
+      return res.status(400).json({ code: "bad_request", detail: `target_segment must be one of: ${VALID_SEGMENTS.join(", ")} or a saved segment UUID` });
     }
     const abEnabled = Boolean(ab_test_enabled);
     const subjectB = abEnabled ? (subject_b?.trim() ?? null) : null;
@@ -205,7 +222,7 @@ router.get(
       if (!campaignResult.rows?.length) {
         return res.status(404).json({ code: "not_found", detail: "Campaign not found" });
       }
-      const segment = (campaignResult.rows[0] as any).target_segment as Segment;
+      const segment = (campaignResult.rows[0] as any).target_segment as string;
       const { count, members } = await resolveSegment(vendorId, segment);
       return res.json({ segment, count, members });
     } catch (err: any) {
@@ -239,7 +256,7 @@ router.patch(
           WHERE id = ${id}::uuid AND vendor_id = ${vendorId}::uuid
         `);
         if (campaignResult.rows?.length) {
-          const segment = (campaignResult.rows[0] as any).target_segment as Segment;
+          const segment = (campaignResult.rows[0] as any).target_segment as string;
           const { count } = await resolveSegment(vendorId, segment);
           recipientCount = count;
         }
@@ -320,7 +337,7 @@ router.post(
       }
 
       // 2. Resolve ALL opted-in recipients (no LIMIT — resolveSegment caps at 100 for previews)
-      const emails = await resolveAllRecipients(vendorId, campaign.target_segment as Segment);
+      const emails = await resolveAllRecipients(vendorId, campaign.target_segment as string);
       if (!emails.length) {
         return res.status(422).json({ code: "no_recipients", detail: "No opted-in recipients found for this segment" });
       }

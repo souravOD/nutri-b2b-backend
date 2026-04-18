@@ -221,7 +221,6 @@ router.get(
                 WHERE vendor_id = ${vendorId}::uuid
                   AND type = 'system'
                   AND status != 'dismissed'
-                  AND (display_until IS NULL OR display_until > now())
                 ORDER BY created_at DESC
                 LIMIT 3
             `);
@@ -262,14 +261,13 @@ router.post(
             else if (expiresIn === "7d") displayUntil = new Date(Date.now() + 7 * 86_400_000).toISOString();
 
             const result = await db.execute(sql`
-                INSERT INTO gold.b2b_alerts (vendor_id, type, priority, title, description, display_until)
+                INSERT INTO gold.b2b_alerts (vendor_id, type, priority, title, description)
                 VALUES (
                     ${vendorId}::uuid,
                     'system',
                     ${priority},
                     ${String(title).slice(0, 255)},
-                    ${description?.trim() || null},
-                    ${displayUntil ? sql`${displayUntil}::timestamptz` : sql`NULL`}
+                    ${description?.trim() || null}
                 )
                 RETURNING id, title, description, priority, status, created_at
             `);

@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS gold.b2b_push_tokens (
   id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id  UUID        NOT NULL REFERENCES gold.b2b_customers(id) ON DELETE CASCADE,
-  vendor_id    UUID        NOT NULL REFERENCES gold.b2b_vendors(id)   ON DELETE CASCADE,
+  vendor_id    UUID        NOT NULL REFERENCES gold.vendors(id)        ON DELETE CASCADE,
   device_token TEXT        NOT NULL,
   platform     TEXT        NOT NULL DEFAULT 'web'
                CHECK (platform IN ('web', 'ios', 'android')),

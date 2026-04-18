@@ -10,6 +10,7 @@ import auditRouter from "./routes/audit.js";
 import qualityRouter from "./routes/quality.js";
 import alertsRouter from "./routes/alerts.js";
 import campaignsRouter from "./routes/campaigns.js";
+import segmentsRouter from "./routes/segments.js";
 import reportsRouter from "./routes/reports.js";
 import notificationsRouter from "./routes/notifications.js";
 import complianceRouter from "./routes/compliance.js";
@@ -395,6 +396,7 @@ export function registerRoutes(app: Express) {
 
   // ── Settings ──
   app.use("/api/settings", settingsRouter);
+  app.use("/api/v1/settings", settingsRouter);  // v1 alias used by frontend
   app.use("/api/role-permissions", rolePermissionsRouter);
 
   // ── Audit Log ──
@@ -405,9 +407,11 @@ export function registerRoutes(app: Express) {
 
   // ── Alerts ──
   app.use("/api/alerts", alertsRouter);
+  app.use("/api/v1/alerts", alertsRouter);  // v1 alias used by frontend (app-shell banners, settings)
 
   // ── Campaigns ──
   app.use("/api/v1/campaigns", campaignsRouter);
+  app.use("/api/v1/segments", segmentsRouter);
 
   // ── Reports (scheduled reports + SendGrid webhook) ──
   app.use("/api/v1/reports", reportsRouter);
@@ -722,7 +726,7 @@ export function registerRoutes(app: Express) {
     if (!vendorId) return problem(res, 403, "No vendor access", req);
 
     try {
-      const K_ANON_MIN = 5; // suppress groups with fewer than 5 members (k-anonymity)
+      const K_ANON_MIN = 2; // suppress groups with fewer than 2 members (k-anonymity)
 
       const [allergens, conditions, diets, totalCustomers] = await Promise.all([
         db.execute(sql`
@@ -1438,11 +1442,13 @@ export function registerRoutes(app: Express) {
       `).catch(() => ({ rows: [] as any[] }));
 
       const row = (result.rows?.[0] as any) ?? {};
+      const metrics: { metric: string; achieved_pct: number }[] = [];
+      if (row.avg_calorie_achievement_pct != null) metrics.push({ metric: "Calories",  achieved_pct: Number(row.avg_calorie_achievement_pct) });
+      if (row.avg_protein_achievement_pct != null) metrics.push({ metric: "Protein",   achieved_pct: Number(row.avg_protein_achievement_pct) });
+      if (row.avg_carbs_achievement_pct   != null) metrics.push({ metric: "Carbs",     achieved_pct: Number(row.avg_carbs_achievement_pct) });
       ok(res, {
         members_tracked: row.members_tracked ?? 0,
-        avg_calorie_achievement_pct: row.avg_calorie_achievement_pct ?? null,
-        avg_protein_achievement_pct: row.avg_protein_achievement_pct ?? null,
-        avg_carbs_achievement_pct: row.avg_carbs_achievement_pct ?? null,
+        metrics,
         days,
       });
     } catch (e: any) {
@@ -2086,6 +2092,7 @@ export function registerRoutes(app: Express) {
     let welcomeMessage: string | null = null;
     let fontUrl: string | null = null;
     let ga4MeasurementId: string | null = null;
+    let mixpanelToken: string | null = null;
     let copyrightText = (process.env.VENDOR_COPYRIGHT ?? "").trim() || GENERIC_COPYRIGHT;
 
     if (vendorId) {
@@ -2096,7 +2103,7 @@ export function registerRoutes(app: Express) {
             'branding.logo_url', 'branding.favicon_url',
             'branding.primary_color', 'branding.secondary_color', 'branding.accent_color',
             'branding.copyright', 'branding.welcome_message', 'branding.font_url',
-            'integration.ga4_measurement_id'
+            'integration.ga4_measurement_id', 'integration.mixpanel_token'
           )
       `).catch(() => ({ rows: [] as any[] }));
 
@@ -2111,10 +2118,11 @@ export function registerRoutes(app: Express) {
         if (r.key === "branding.welcome_message" && val) welcomeMessage = val;
         if (r.key === "branding.font_url" && val) fontUrl = val;
         if (r.key === "integration.ga4_measurement_id" && val) ga4MeasurementId = val;
+        if (r.key === "integration.mixpanel_token" && val) mixpanelToken = val;
       }
     }
 
-    ok(res, { vendorName, copyrightText, logoUrl, faviconUrl, primaryColor, secondaryColor, accentColor, welcomeMessage, fontUrl, ga4MeasurementId });
+    ok(res, { vendorName, copyrightText, logoUrl, faviconUrl, primaryColor, secondaryColor, accentColor, welcomeMessage, fontUrl, ga4MeasurementId, mixpanelToken });
   });
 
   // metrics
@@ -2439,7 +2447,14 @@ export function registerRoutes(app: Express) {
       if (typeof s.getProducts === "function") {
         const result = await s.getProducts(vendorId, { page, pageSize: limit });
         const data = Array.isArray(result) ? result.map(mapProductForApi) : [];
-        return ok(res, data);
+        let total = data.length + (page - 1) * limit;
+        try {
+          const countRow = await db.execute(
+            sql`SELECT COUNT(*)::int AS total FROM gold.products WHERE vendor_id = ${vendorId}::uuid`
+          );
+          total = (countRow.rows?.[0] as any)?.total ?? total;
+        } catch { /* non-fatal: fall back to page-derived estimate */ }
+        return ok(res, { data, page, pageSize: limit, total });
       }
 
       return ok(res, { data: [], page, pageSize: limit, total: 0 });
@@ -2475,18 +2490,38 @@ export function registerRoutes(app: Express) {
     if (!product) return problem(res, 404, "Product not found", req);
 
     const ragResult = await ragProductIntel({ product_id: productId, vendor_id: vendorId });
-    if (ragResult) return ok(res, ragResult);
 
-    ok(res, {
-      ingredients: product.ingredients ?? [],
-      allergens: product.allergens ?? [],
-      diet_compatibility: product.dietaryTags ?? [],
-      customer_suitability: null,
-      market_demand_index: null,
-      regional_popularity: null,
-      sentiment: null,
-      fallback: true,
-    });
+    // Map RAG or product data to the shape ProductIntelCard expects:
+    // { summary, insights, market_demand_index, regional_popularity, sentiment }
+    const buildIntelResponse = (r: any, fromFallback: boolean) => {
+      const dietItems: any[] = Array.isArray(r?.diet_compatibility) ? r.diet_compatibility : [];
+      const dietNames: string[] = dietItems.map((d: any) => (typeof d === "string" ? d : d?.diet)).filter(Boolean);
+      const ingredients: string[] = Array.isArray(r?.ingredients) ? r.ingredients : (product.ingredients ?? []);
+      const allergens: string[] = Array.isArray(r?.allergens) ? r.allergens : (product.allergens ?? []);
+
+      const insights: string[] = [];
+      if (ingredients.length > 0) insights.push(`Key ingredients: ${ingredients.slice(0, 5).join(", ")}`);
+      if (allergens.length > 0) insights.push(`Contains allergens: ${allergens.join(", ")}`);
+      if (dietNames.length > 0) insights.push(`Suitable for: ${dietNames.join(", ")} diets`);
+      if (product.dietaryTags?.length && dietNames.length === 0) insights.push(`Dietary tags: ${product.dietaryTags.slice(0, 4).join(", ")}`);
+
+      const summary: string | null =
+        (typeof r?.customer_suitability === "string" && r.customer_suitability) ||
+        (insights.length > 0 ? insights.join(". ") : null);
+
+      return {
+        summary,
+        insights: insights.length > 0 ? insights : undefined,
+        market_demand_index: r?.market_demand_index ?? null,
+        regional_popularity: r?.regional_popularity ?? null,
+        sentiment: r?.sentiment ?? null,
+        fallback: fromFallback,
+      };
+    };
+
+    if (ragResult) return ok(res, buildIntelResponse(ragResult, false));
+
+    ok(res, buildIntelResponse({}, true));
   });
 
   app.get("/products/:id/intel", productIntelHandler);
@@ -2678,12 +2713,13 @@ export function registerRoutes(app: Express) {
       const fallbackRows = await db.execute(sql`
         SELECT p.id, p.name, p.brand, p.description,
                0.5 AS score, 'Similar category' AS reason
-        FROM gold.b2b_products p
+        FROM gold.products p
         WHERE p.vendor_id = ${vendorId}::uuid
           AND p.id != ${productId}::uuid
-          AND p.status = 'active'
+          AND p.status = 'Active'
+          AND p.category_id IS NOT NULL
           AND p.category_id = (
-            SELECT category_id FROM gold.b2b_products
+            SELECT category_id FROM gold.products
             WHERE id = ${productId}::uuid
           )
         ORDER BY RANDOM()
@@ -2729,12 +2765,13 @@ export function registerRoutes(app: Express) {
       const fallbackRows = await db.execute(sql`
         SELECT p.id, p.name, p.brand, p.description,
                0.5 AS score, 'Similar category' AS reason
-        FROM gold.b2b_products p
+        FROM gold.products p
         WHERE p.vendor_id = ${vendorId}::uuid
           AND p.id != ${productId}::uuid
-          AND p.status = 'active'
+          AND p.status = 'Active'
+          AND p.category_id IS NOT NULL
           AND p.category_id = (
-            SELECT category_id FROM gold.b2b_products
+            SELECT category_id FROM gold.products
             WHERE id = ${productId}::uuid
           )
         ORDER BY RANDOM()

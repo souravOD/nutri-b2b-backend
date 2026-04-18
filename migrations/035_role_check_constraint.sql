@@ -26,13 +26,16 @@ ALTER TABLE gold.b2b_user_links
     'wellness_manager', 'marketing_manager'
   ));
 
--- ── gold.b2b_invitations ───────────────────────────────────────────────────────
+-- ── gold.invitations ──────────────────────────────────────────────────────────
 -- migration 013 inline CHECK only had 3 roles; update it to match
-ALTER TABLE gold.b2b_invitations
+ALTER TABLE gold.invitations
   DROP CONSTRAINT IF EXISTS b2b_invitations_role_check;
 
-ALTER TABLE gold.b2b_invitations
-  ADD CONSTRAINT b2b_invitations_role_check
+ALTER TABLE gold.invitations
+  DROP CONSTRAINT IF EXISTS invitations_role_check;
+
+ALTER TABLE gold.invitations
+  ADD CONSTRAINT invitations_role_check
   CHECK (role IN (
     'vendor_admin', 'vendor_operator', 'vendor_viewer',
     'wellness_manager', 'marketing_manager'
